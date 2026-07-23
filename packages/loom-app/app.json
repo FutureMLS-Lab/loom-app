@@ -1,0 +1,28 @@
+{
+  "expo": {
+    "name": "Loom",
+    "slug": "loom-app",
+    "version": "0.1.0",
+    "orientation": "default",
+    "scheme": "loom",
+    "userInterfaceStyle": "dark",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "engineering.loom.app",
+      "infoPlist": {
+        "NSLocalNetworkUsageDescription": "Loom connects to the Loom gateway running on your development machine.",
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        }
+      }
+    },
+    "android": {
+      "package": "engineering.loom.app",
+      "usesCleartextTraffic": true
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "single"
+    }
+  }
+}

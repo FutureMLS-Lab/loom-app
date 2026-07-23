@@ -1,0 +1,16 @@
+{
+  "name": "loom-app-monorepo",
+  "private": true,
+  "scripts": {
+    "web": "pnpm --filter loom-app web",
+    "gateway": "pnpm --filter loom-app gateway",
+    "typecheck": "pnpm --filter loom-app typecheck",
+    "web:export": "pnpm --filter loom-app web:export"
+  },
+  "workspaces": {
+    "packages": [
+      "packages/loom-app"
+    ]
+  },
+  "packageManager": "pnpm@10.11.0"
+}
