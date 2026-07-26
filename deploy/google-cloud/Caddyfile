@@ -1,0 +1,13 @@
+loom-gateway.34-102-85-57.sslip.io {
+  encode zstd gzip
+
+  header {
+    Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    X-Content-Type-Options "nosniff"
+    Referrer-Policy "no-referrer"
+  }
+
+  reverse_proxy 127.0.0.1:38788 {
+    flush_interval -1
+  }
+}

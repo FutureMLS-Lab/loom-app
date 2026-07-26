@@ -1,0 +1,22 @@
+[Unit]
+Description=Loom App authenticated gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=charles
+Group=charles
+WorkingDirectory=/opt/loom-app-gateway
+EnvironmentFile=/etc/loom-app-gateway.env
+ExecStart=/usr/bin/node /opt/loom-app-gateway/server.mjs
+Restart=always
+RestartSec=3
+TimeoutStopSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

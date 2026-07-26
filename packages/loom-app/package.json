@@ -11,19 +11,27 @@
     "gateway": "node gateway/server.mjs"
   },
   "dependencies": {
-    "@expo/vector-icons": "^15.0.2",
-    "expo": "~55.0.8",
-    "expo-status-bar": "~55.0.0",
+    "@expo/dom-webview": "55.0.6",
+    "@expo/vector-icons": "^15.1.1",
+    "@react-native-async-storage/async-storage": "2.2.0",
+    "@xterm/xterm": "^6.0.0",
+    "expo": "~55.0.28",
+    "expo-dev-client": "~55.0.37",
+    "expo-font": "~55.0.8",
+    "expo-status-bar": "~55.0.6",
+    "punycode": "^2.3.1",
     "react": "19.2.0",
     "react-dom": "19.2.0",
-    "react-native": "0.83.1",
-    "react-native-safe-area-context": "~5.7.0",
-    "react-native-web": "^0.21.0"
+    "react-native": "0.83.10",
+    "react-native-markdown-display": "^7.0.2",
+    "react-native-safe-area-context": "~5.6.2",
+    "react-native-web": "^0.21.2",
+    "react-native-webview": "13.16.0"
   },
   "devDependencies": {
-    "@babel/core": "^7.25.2",
+    "@babel/core": "^7.29.7",
     "@types/react": "~19.2.17",
-    "babel-preset-expo": "~55.0.0",
+    "babel-preset-expo": "~55.0.24",
     "typescript": "5.9.3"
   },
   "packageManager": "pnpm@10.11.0"

@@ -6,10 +6,13 @@ import type {
   TaskDetail,
   TaskDiff,
   TerminalCapture,
+  TerminalKey,
 } from './types';
 
 export const DEFAULT_GATEWAY_URL =
   process.env.EXPO_PUBLIC_LOOM_GATEWAY_URL?.trim() || 'http://127.0.0.1:8787';
+export const DEFAULT_GATEWAY_AUTH_TOKEN =
+  process.env.EXPO_PUBLIC_LOOM_GATEWAY_AUTH_TOKEN?.trim() || '';
 
 export class LoomApiError extends Error {
   constructor(
@@ -32,9 +35,14 @@ function scoped(path: string, projectId: string): string {
 
 export class LoomClient {
   readonly baseUrl: string;
+  readonly authToken: string;
 
-  constructor(baseUrl: string = DEFAULT_GATEWAY_URL) {
+  constructor(
+    baseUrl: string = DEFAULT_GATEWAY_URL,
+    authToken: string = DEFAULT_GATEWAY_AUTH_TOKEN,
+  ) {
     this.baseUrl = normalizeBaseUrl(baseUrl);
+    this.authToken = authToken.trim();
   }
 
   private async request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -42,6 +50,7 @@ export class LoomClient {
       ...init,
       headers: {
         Accept: 'application/json',
+        ...(this.authToken ? { Authorization: `Bearer ${this.authToken}` } : {}),
         ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
         ...init?.headers,
       },
@@ -71,6 +80,24 @@ export class LoomClient {
   async projects(): Promise<LoomProject[]> {
     const result = await this.request<{ projects?: LoomProject[] }>('/api/projects');
     return result.projects || [];
+  }
+
+  async addProject(path: string): Promise<{ id: string; projects?: LoomProject[] }> {
+    return this.request<{ id: string; projects?: LoomProject[] }>('/api/projects', {
+      method: 'POST',
+      body: JSON.stringify({
+        path: path.trim(),
+        mode: 'existing',
+        code_root_pattern: '.',
+      }),
+    });
+  }
+
+  async removeProject(projectId: string): Promise<{ ok?: boolean; projects?: LoomProject[] }> {
+    return this.request<{ ok?: boolean; projects?: LoomProject[] }>(
+      `/api/projects/${encodeURIComponent(projectId)}`,
+      { method: 'DELETE' },
+    );
   }
 
   async tasks(projectId: string): Promise<LoomTask[]> {
@@ -124,6 +151,13 @@ export class LoomClient {
         body: JSON.stringify({ text, submit: true }),
       },
     );
+  }
+
+  async sendKey(target: string, key: TerminalKey): Promise<{ ok?: boolean }> {
+    return this.request<{ ok?: boolean }>('/api/tmux/send-key', {
+      method: 'POST',
+      body: JSON.stringify({ target, key }),
+    });
   }
 
   async capture(target: string, lines = 180): Promise<TerminalCapture> {

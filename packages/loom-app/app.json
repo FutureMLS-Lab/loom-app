@@ -5,10 +5,13 @@
     "version": "0.1.0",
     "orientation": "default",
     "scheme": "loom",
+    "icon": "./assets/loom-icon.png",
     "userInterfaceStyle": "dark",
     "ios": {
       "supportsTablet": true,
+      "icon": "./assets/loom-icon.png",
       "bundleIdentifier": "engineering.loom.app",
+      "appleTeamId": "CUN3QK592H",
       "infoPlist": {
         "NSLocalNetworkUsageDescription": "Loom connects to the Loom gateway running on your development machine.",
         "NSAppTransportSecurity": {
@@ -17,12 +20,12 @@
       }
     },
     "android": {
-      "package": "engineering.loom.app",
-      "usesCleartextTraffic": true
+      "package": "engineering.loom.app"
     },
     "web": {
       "bundler": "metro",
-      "output": "single"
+      "output": "single",
+      "favicon": "./assets/loom-icon.png"
     }
   }
 }

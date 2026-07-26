@@ -86,6 +86,44 @@ export type TerminalCapture = {
   error?: string;
 };
 
+export type TerminalKey =
+  | 'Escape'
+  | 'C-c'
+  | 'C-a'
+  | 'C-d'
+  | 'C-e'
+  | 'C-l'
+  | 'C-z'
+  | 'M-b'
+  | 'M-f'
+  | 'Up'
+  | 'Down'
+  | 'Left'
+  | 'Right'
+  | 'Tab'
+  | 'BTab'
+  | 'Enter'
+  | 'Backspace'
+  | 'Space'
+  | 'Home'
+  | 'End'
+  | 'DC'
+  | 'IC'
+  | 'PageUp'
+  | 'PageDown'
+  | 'F1'
+  | 'F2'
+  | 'F3'
+  | 'F4'
+  | 'F5'
+  | 'F6'
+  | 'F7'
+  | 'F8'
+  | 'F9'
+  | 'F10'
+  | 'F11'
+  | 'F12';
+
 export type AgentStartResult = {
   ok?: boolean;
   target?: string;
