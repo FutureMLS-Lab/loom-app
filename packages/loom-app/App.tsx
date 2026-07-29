@@ -30,6 +30,7 @@ import {
 import Markdown from 'react-native-markdown-display';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
+  memo,
   useCallback,
   useEffect,
   useMemo,
@@ -2027,7 +2028,7 @@ function ConversationQuestionCard({
   );
 }
 
-function ConversationMessageRow({
+const ConversationMessageRow = memo(function ConversationMessageRow({
   message,
   answering,
   answerFeedback,
@@ -2090,7 +2091,7 @@ function ConversationMessageRow({
       </View>
     </View>
   );
-}
+});
 
 function ConversationView({
   feed,
@@ -2127,6 +2128,18 @@ function ConversationView({
   const sessionRef = useRef('');
   const [atLatest, setAtLatest] = useState(true);
   const messages = feed?.messages || [];
+
+  const renderItem = useCallback(
+    ({ item }: { item: ConversationMessage }) => (
+      <ConversationMessageRow
+        message={item}
+        answering={answering}
+        answerFeedback={answerFeedback}
+        onAnswer={onAnswer}
+      />
+    ),
+    [answerFeedback, answering, onAnswer],
+  );
 
   useEffect(() => {
     const sessionId = feed?.session_id || '';
@@ -2182,14 +2195,7 @@ function ConversationView({
         ref={listRef}
         data={messages}
         keyExtractor={(item) => item.id}
-        renderItem={({ item }) => (
-          <ConversationMessageRow
-            message={item}
-            answering={answering}
-            answerFeedback={answerFeedback}
-            onAnswer={onAnswer}
-          />
-        )}
+        renderItem={renderItem}
         keyboardDismissMode="interactive"
         keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator
@@ -2351,6 +2357,7 @@ function LoomApp() {
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const [terminalFocused, setTerminalFocused] = useState(false);
   const [terminalBlurRequest, setTerminalBlurRequest] = useState(0);
+  const [terminalTaskKey, setTerminalTaskKey] = useState('');
   const selectedRef = useRef({ projectId: '', slug: '' });
   const captureLinesRef = useRef(180);
   const conversationLimitRef = useRef(INITIAL_CONVERSATION_MESSAGES);
@@ -2398,6 +2405,8 @@ function LoomApp() {
   ]);
   const target = agentTarget(detail, sessions);
   terminalTargetRef.current = target;
+  const selectionKey = projectId && selectedSlug ? `${projectId}:${selectedSlug}` : '';
+  const terminalMounted = Boolean(selectionKey) && terminalTaskKey === selectionKey;
   const keyboardFocusMode = isCompact && keyboardVisible && tab === 'activity';
   const terminalKeyboardFocusMode = keyboardFocusMode && terminalFocused;
 
@@ -2482,14 +2491,13 @@ function LoomApp() {
   );
 
   const loadSelected = useCallback(
-    async (includeDiff = false) => {
+    async () => {
       const current = selectedRef.current;
       if (!current.projectId || !current.slug) return;
       try {
-        const [nextDetail, nextSessions, nextDiff] = await Promise.all([
+        const [nextDetail, nextSessions] = await Promise.all([
           client.task(current.projectId, current.slug),
           client.sessions(current.projectId, current.slug),
-          includeDiff ? client.diff(current.projectId, current.slug) : Promise.resolve(null),
         ]);
         if (
           selectedRef.current.projectId !== current.projectId ||
@@ -2499,7 +2507,6 @@ function LoomApp() {
         }
         setDetail(nextDetail);
         setSessions(nextSessions);
-        if (nextDiff) setDiff(nextDiff);
         const nextTarget = agentTarget(nextDetail, nextSessions);
         if (nextTarget && Platform.OS === 'web') {
           try {
@@ -2528,6 +2535,27 @@ function LoomApp() {
     },
     [client],
   );
+
+  const loadDiff = useCallback(async () => {
+    const current = selectedRef.current;
+    if (!current.projectId || !current.slug) return;
+    try {
+      const nextDiff = await client.diff(current.projectId, current.slug);
+      if (
+        selectedRef.current.projectId === current.projectId &&
+        selectedRef.current.slug === current.slug
+      ) {
+        setDiff(nextDiff);
+      }
+    } catch (error) {
+      if (
+        selectedRef.current.projectId === current.projectId &&
+        selectedRef.current.slug === current.slug
+      ) {
+        setTaskError(error instanceof Error ? error.message : String(error));
+      }
+    }
+  }, [client]);
 
   const loadConversation = useCallback(
     async (showLoading = false, updateOnly = false) => {
@@ -2570,9 +2598,13 @@ function LoomApp() {
           const updates = new Map(
             nextConversation.messages.map((item) => [item.id, item]),
           );
-          const merged = existing.messages.map(
-            (item) => updates.get(item.id) || item,
-          );
+          // Reuse the previous object whenever the poll returned identical
+          // content, so memoized rows skip re-parsing their markdown.
+          const merged = existing.messages.map((item) => {
+            const update = updates.get(item.id);
+            if (!update) return item;
+            return JSON.stringify(update) === JSON.stringify(item) ? item : update;
+          });
           const existingIds = new Set(merged.map((item) => item.id));
           for (const item of nextConversation.messages) {
             if (!existingIds.has(item.id)) merged.push(item);
@@ -2779,10 +2811,21 @@ function LoomApp() {
 
   useEffect(() => {
     if (!projectId || !selectedSlug || !appActive) return;
-    void loadSelected(true);
-    const timer = setInterval(() => void loadSelected(false), 4000);
+    void loadSelected();
+    const timer = setInterval(() => void loadSelected(), 4000);
     return () => clearInterval(timer);
   }, [appActive, loadSelected, projectId, selectedSlug]);
+
+  useEffect(() => {
+    if (tab !== 'changes' || !projectId || !selectedSlug || !appActive) return;
+    void loadDiff();
+  }, [appActive, loadDiff, projectId, selectedSlug, tab]);
+
+  // Building the terminal WebView costs a visible frame drop, so keep it out
+  // of the tree until Terminal is opened for the selected task.
+  useEffect(() => {
+    if (tab === 'activity' && selectionKey) setTerminalTaskKey(selectionKey);
+  }, [selectionKey, tab]);
 
   useEffect(() => {
     if (!projectId || !selectedSlug || !appActive) return;
@@ -2834,17 +2877,26 @@ function LoomApp() {
     await Promise.all([
       loadProjects(),
       loadTasks(projectId),
-      loadSelected(true),
+      loadSelected(),
       loadConversation(true),
+      tab === 'changes' ? loadDiff() : Promise.resolve(),
     ]);
-  }, [loadConversation, loadProjects, loadSelected, loadTasks, projectId]);
+  }, [
+    loadConversation,
+    loadDiff,
+    loadProjects,
+    loadSelected,
+    loadTasks,
+    projectId,
+    tab,
+  ]);
 
   const loadOlderCapture = useCallback(() => {
     const nextLines = Math.min(captureLinesRef.current * 2, MAX_CAPTURE_LINES);
     if (nextLines === captureLinesRef.current) return;
     captureLinesRef.current = nextLines;
     setCaptureLines(nextLines);
-    void loadSelected(false);
+    void loadSelected();
   }, [loadSelected]);
 
   const loadOlderConversation = useCallback(() => {
@@ -2889,7 +2941,7 @@ function LoomApp() {
           await client.sendKey(currentTarget, key);
           await new Promise((resolve) => setTimeout(resolve, 120));
           if (terminalTargetRef.current === currentTarget) {
-            void loadSelected(false);
+            void loadSelected();
           }
         })
         .catch((error) => {
@@ -3019,7 +3071,7 @@ function LoomApp() {
           await client.stopAgent(projectId, selectedSlug);
         }
         await new Promise((resolve) => setTimeout(resolve, 600));
-        await Promise.all([loadSelected(true), loadConversation(true)]);
+        await Promise.all([loadSelected(), loadConversation(true)]);
         await loadTasks(projectId);
       } catch (error) {
         setTaskError(error instanceof Error ? error.message : String(error));
@@ -3098,7 +3150,7 @@ function LoomApp() {
         armForceSend();
       }
       refreshConversationBurst();
-      setTimeout(() => void loadSelected(false), 500);
+      setTimeout(() => void loadSelected(), 500);
     } catch (error) {
       setPendingConversationMessages((current) =>
         current.filter((item) => item.id !== localId),
@@ -3153,7 +3205,7 @@ function LoomApp() {
           : 'Force command delivered to Cursor.',
       );
       refreshConversationBurst();
-      setTimeout(() => void loadSelected(false), 350);
+      setTimeout(() => void loadSelected(), 350);
     } catch (error) {
       setOptimisticActivity(null);
       if (activityTimerRef.current) {
@@ -3231,7 +3283,7 @@ function LoomApp() {
           setConversationAnswerFeedback('Answer submitted.');
         }
         refreshConversationBurst();
-        setTimeout(() => void loadSelected(false), 350);
+        setTimeout(() => void loadSelected(), 350);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         setOptimisticActivity(null);
@@ -3541,8 +3593,9 @@ function LoomApp() {
             label="Refresh"
             icon="refresh-outline"
             onPress={() => {
-              void loadSelected(true);
+              void loadSelected();
               void loadConversation(true);
+              if (tab === 'changes') void loadDiff();
             }}
             disabled={actionBusy}
           />
@@ -3606,13 +3659,12 @@ function LoomApp() {
             answerFeedback={conversationAnswerFeedback}
             keyboardVisible={keyboardVisible}
             onLoadMore={loadOlderConversation}
-            onAnswer={(question, selected, customAnswer) =>
-              void sendConversationAnswer(question, selected, customAnswer)
-            }
+            onAnswer={sendConversationAnswer}
           />
         </View>
       ) : null}
 
+      {terminalMounted ? (
       <View
         style={[
           styles.activityContent,
@@ -3668,6 +3720,7 @@ function LoomApp() {
             onStreamStateChange={setTerminalStreamState}
           />
       </View>
+      ) : null}
       {tab === 'changes' || tab === 'notes' ? (
         <ScrollView
           automaticallyAdjustKeyboardInsets
