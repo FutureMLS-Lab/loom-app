@@ -86,6 +86,63 @@ export type TerminalCapture = {
   error?: string;
 };
 
+export type ConversationTool = {
+  name: string;
+  summary: string;
+  status: 'running' | 'completed' | 'error' | 'canceled';
+  input?: string;
+  output?: string;
+};
+
+export type ConversationOption = {
+  id: string;
+  label: string;
+  description?: string;
+  value: string;
+  terminal_index?: number;
+  selected?: boolean;
+};
+
+export type ConversationPrompt = {
+  id: string;
+  header?: string;
+  prompt: string;
+  allow_multiple: boolean;
+  options: ConversationOption[];
+};
+
+export type ConversationQuestion = {
+  id?: string;
+  title: string;
+  source?: 'transcript' | 'numbered' | 'terminal';
+  status: 'pending' | 'answered' | 'error' | 'canceled';
+  answer?: string;
+  questions: ConversationPrompt[];
+};
+
+export type ConversationMessage = {
+  id: string;
+  kind: 'user' | 'assistant' | 'tool' | 'question' | 'event';
+  text?: string;
+  created_at?: number | null;
+  delivery?: 'sending' | 'queued';
+  tool?: ConversationTool;
+  question?: ConversationQuestion;
+};
+
+export type ConversationFeed = {
+  ok: boolean;
+  available: boolean;
+  agent?: string;
+  online?: boolean;
+  working?: boolean;
+  session_id?: string | null;
+  updated_at?: number | null;
+  messages: ConversationMessage[];
+  total: number;
+  has_more: boolean;
+};
+
 export type TerminalKey =
   | 'Escape'
   | 'C-c'

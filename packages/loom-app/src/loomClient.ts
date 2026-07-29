@@ -1,5 +1,6 @@
 import type {
   AgentStartResult,
+  ConversationFeed,
   LoomProject,
   LoomTask,
   SessionList,
@@ -119,6 +120,19 @@ export class LoomClient {
     );
   }
 
+  async conversation(
+    projectId: string,
+    slug: string,
+    limit = 160,
+  ): Promise<ConversationFeed> {
+    return this.request<ConversationFeed>(
+      scoped(
+        `/api/tasks/${encodeURIComponent(slug)}/conversation?limit=${Math.max(20, Math.min(500, limit))}`,
+        projectId,
+      ),
+    );
+  }
+
   async diff(projectId: string, slug: string): Promise<TaskDiff> {
     return this.request<TaskDiff>(
       scoped(`/api/tasks/${encodeURIComponent(slug)}/diff`, projectId),
@@ -149,6 +163,42 @@ export class LoomClient {
       {
         method: 'POST',
         body: JSON.stringify({ text, submit: true }),
+      },
+    );
+  }
+
+  async forceSendMessage(
+    projectId: string,
+    slug: string,
+  ): Promise<{ ok?: boolean; working?: boolean }> {
+    return this.request<{ ok?: boolean; working?: boolean }>(
+      scoped(
+        `/api/tasks/${encodeURIComponent(slug)}/claude/force-send`,
+        projectId,
+      ),
+      { method: 'POST', body: '{}' },
+    );
+  }
+
+  async answerConversationQuestion(
+    projectId: string,
+    slug: string,
+    questionId: string,
+    selectedIds: string[],
+    customText = '',
+  ): Promise<{ ok?: boolean; pending?: boolean }> {
+    return this.request<{ ok?: boolean; pending?: boolean }>(
+      scoped(
+        `/api/tasks/${encodeURIComponent(slug)}/conversation/answer`,
+        projectId,
+      ),
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          question_id: questionId,
+          selected_ids: selectedIds,
+          custom_text: customText,
+        }),
       },
     );
   }

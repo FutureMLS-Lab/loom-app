@@ -8,7 +8,6 @@ import {
   FlatList,
   Image,
   Keyboard,
-  KeyboardAvoidingView,
   Modal,
   PanResponder,
   Platform,
@@ -47,6 +46,10 @@ import {
   projectLabel,
 } from './src/loomClient';
 import type {
+  ConversationFeed,
+  ConversationMessage,
+  ConversationQuestion,
+  ConversationTool,
   LoomProject,
   LoomTask,
   SessionList,
@@ -205,11 +208,27 @@ const markdownStyles = StyleSheet.create({
   td: { color: colors.textMuted, padding: 8, borderColor: colors.borderSoft },
 });
 
-type Tab = 'activity' | 'changes' | 'notes';
+const conversationMarkdownStyles = StyleSheet.create({
+  ...markdownStyles,
+  body: {
+    ...markdownStyles.body,
+    color: colors.text,
+    fontSize: 15,
+    lineHeight: 22,
+  },
+  paragraph: { marginTop: 0, marginBottom: 10 },
+});
+
+type Tab = 'conversation' | 'activity' | 'changes' | 'notes';
+type OptimisticActivity = 'sending' | 'queued' | 'forcing' | null;
 type IconName = keyof typeof Ionicons.glyphMap;
 
 const DIFF_PREVIEW_LIMIT = 8000;
 const MAX_CAPTURE_LINES = 500;
+const MAX_CONVERSATION_MESSAGES = 500;
+const INITIAL_CONVERSATION_MESSAGES = 60;
+const AGENT_WORKING_PATTERN =
+  /(?:esc\s+to\s+interrupt|ctrl\s*\+\s*c\s+to\s+stop)/i;
 const TERMINAL_FONT_SIZE_KEY = 'loom-app:terminal-font-size';
 const SELECTED_PROJECT_KEY = 'loom-app:selected-project';
 const SELECTED_TAB_KEY = 'loom-app:selected-tab';
@@ -947,7 +966,7 @@ function TerminalKeyboard({
         <Text style={styles.terminalKeyboardHint}>
           {disabled
             ? disabledReason
-            : 'Keys act immediately in the active terminal. Enter confirms the highlighted choice.'}
+            : 'Keys act immediately. Double-tap Enter to force a queued Cursor follow-up.'}
         </Text>
       </View>
       <ExpandedTerminalKeyboard
@@ -1268,6 +1287,7 @@ function LiveTerminalView({
 function ActivityView({
   capture,
   running,
+  working,
   target,
   gatewayUrl,
   gatewayAuthToken,
@@ -1289,6 +1309,7 @@ function ActivityView({
 }: {
   capture: TerminalCapture | null;
   running: boolean;
+  working: boolean;
   target: string;
   gatewayUrl: string;
   gatewayAuthToken: string;
@@ -1420,7 +1441,10 @@ function ActivityView({
           ) : (
             <Text style={styles.captureLineCount}>{captureLines} lines</Text>
           )}
-          <StatusPill running={running} />
+          <StatusPill
+            running={working}
+            label={working ? 'Working' : running ? 'Ready' : 'Stopped'}
+          />
           {liveTerminal && (
             <Pressable
               accessibilityRole="button"
@@ -1727,6 +1751,548 @@ function NotesView({ detail }: { detail: TaskDetail | null }) {
   );
 }
 
+function ConversationToolCard({ tool }: { tool: ConversationTool }) {
+  const [expanded, setExpanded] = useState(false);
+  const hasDetails = Boolean(tool.input || tool.output);
+  const status =
+    tool.status === 'running'
+      ? { icon: 'ellipsis-horizontal-circle-outline' as IconName, color: colors.amber, label: 'Running' }
+      : tool.status === 'error'
+        ? { icon: 'alert-circle-outline' as IconName, color: colors.red, label: 'Error' }
+        : tool.status === 'canceled'
+          ? { icon: 'remove-circle-outline' as IconName, color: colors.textDim, label: 'Stopped' }
+          : { icon: 'checkmark-circle-outline' as IconName, color: colors.green, label: 'Done' };
+
+  return (
+    <View style={styles.conversationTool}>
+      <Pressable
+        accessibilityRole={hasDetails ? 'button' : undefined}
+        accessibilityLabel={hasDetails ? `${expanded ? 'Collapse' : 'Expand'} ${tool.name}` : undefined}
+        disabled={!hasDetails}
+        onPress={() => setExpanded((current) => !current)}
+        style={({ pressed }) => [
+          styles.conversationToolHeader,
+          pressed && hasDetails && styles.pressed,
+        ]}
+      >
+        <View style={styles.conversationToolIcon}>
+          <Icon name="terminal-outline" size={15} color={colors.primary} />
+        </View>
+        <View style={styles.conversationToolCopy}>
+          <View style={styles.conversationToolTitleRow}>
+            <Text numberOfLines={1} style={styles.conversationToolName}>
+              {tool.name}
+            </Text>
+            <View style={styles.conversationToolStatus}>
+              <Icon name={status.icon} size={13} color={status.color} />
+              <Text style={[styles.conversationToolStatusText, { color: status.color }]}>
+                {status.label}
+              </Text>
+            </View>
+          </View>
+          <Text numberOfLines={2} style={styles.conversationToolSummary}>
+            {tool.summary || tool.name}
+          </Text>
+        </View>
+        {hasDetails ? (
+          <Icon
+            name={expanded ? 'chevron-up' : 'chevron-down'}
+            size={15}
+            color={colors.textDim}
+          />
+        ) : null}
+      </Pressable>
+      {expanded ? (
+        <View style={styles.conversationToolDetails}>
+          {tool.input ? (
+            <View style={styles.conversationToolSection}>
+              <Text style={styles.conversationToolSectionLabel}>Input</Text>
+              <Text selectable style={styles.conversationToolCode}>
+                {tool.input}
+              </Text>
+            </View>
+          ) : null}
+          {tool.output ? (
+            <View style={styles.conversationToolSection}>
+              <Text style={styles.conversationToolSectionLabel}>Result</Text>
+              <Text selectable style={styles.conversationToolCode}>
+                {tool.output}
+              </Text>
+            </View>
+          ) : null}
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+function ConversationQuestionCard({
+  question,
+  disabled,
+  feedback,
+  onAnswer,
+}: {
+  question: ConversationQuestion;
+  disabled: boolean;
+  feedback: string;
+  onAnswer: (
+    question: ConversationQuestion,
+    selected: Record<string, string[]>,
+    customAnswer: string,
+  ) => void;
+}) {
+  const [selected, setSelected] = useState<Record<string, string[]>>(() =>
+    Object.fromEntries(
+      question.questions.map((item) => [
+        item.id,
+        item.options.filter((option) => option.selected).map((option) => option.value),
+      ]),
+    ),
+  );
+  const [customAnswer, setCustomAnswer] = useState('');
+  const pending = question.status === 'pending';
+  const selectedOther = question.questions.some((item) => {
+    const active = new Set(selected[item.id] || []);
+    return item.options.some(
+      (option) => /^other\b/i.test(option.label.trim()) && active.has(option.value),
+    );
+  });
+  const complete =
+    question.questions.every((item) => (selected[item.id] || []).length) &&
+    (!selectedOther || Boolean(customAnswer.trim()));
+
+  const toggleOption = (
+    questionId: string,
+    value: string,
+    allowMultiple: boolean,
+    isOther: boolean,
+    otherValues: string[],
+  ) => {
+    if (!isOther) setCustomAnswer('');
+    setSelected((current) => {
+      const active = current[questionId] || [];
+      const next = allowMultiple
+        ? isOther
+          ? active.includes(value)
+            ? []
+            : [value]
+          : active.includes(value)
+            ? active.filter((item) => item !== value)
+            : [...active.filter((item) => !otherValues.includes(item)), value]
+        : [value];
+      return { ...current, [questionId]: next };
+    });
+  };
+
+  const submit = () => {
+    if (complete) onAnswer(question, selected, customAnswer.trim());
+  };
+
+  return (
+    <View style={styles.conversationQuestion}>
+      <View style={styles.conversationQuestionHeader}>
+        <View style={styles.conversationQuestionIcon}>
+          <Icon name="help-circle-outline" size={17} color={colors.primary} />
+        </View>
+        <View style={styles.conversationQuestionHeaderCopy}>
+          <Text style={styles.conversationQuestionTitle}>{question.title || 'Input needed'}</Text>
+          <Text style={styles.conversationQuestionStatus}>
+            {question.status === 'pending'
+              ? 'Waiting for your answer'
+              : question.status === 'answered'
+                ? 'Answered'
+                : question.status === 'error'
+                  ? 'Could not submit'
+                  : 'No longer active'}
+          </Text>
+        </View>
+      </View>
+      {question.questions.map((item) => (
+        <View key={item.id} style={styles.conversationPrompt}>
+          {item.header ? (
+            <Text style={styles.conversationPromptHeader}>{item.header}</Text>
+          ) : null}
+          <Text style={styles.conversationPromptText}>{item.prompt}</Text>
+          {item.allow_multiple ? (
+            <Text style={styles.conversationPromptHint}>Select all that apply</Text>
+          ) : null}
+          <View style={styles.conversationOptions}>
+            {item.options.map((option) => {
+              const active = (selected[item.id] || []).includes(option.value);
+              const isOther = /^other\b/i.test(option.label.trim());
+              const otherValues = item.options
+                .filter((candidate) => /^other\b/i.test(candidate.label.trim()))
+                .map((candidate) => candidate.value);
+              return (
+                <Pressable
+                  key={option.id}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: active, disabled: !pending || disabled }}
+                  disabled={!pending || disabled}
+                  onPress={() =>
+                    toggleOption(
+                      item.id,
+                      option.value,
+                      item.allow_multiple,
+                      isOther,
+                      otherValues,
+                    )
+                  }
+                  style={({ pressed }) => [
+                    styles.conversationOption,
+                    active && styles.conversationOptionSelected,
+                    pressed && styles.pressed,
+                    (!pending || disabled) && styles.conversationOptionDisabled,
+                  ]}
+                >
+                  <View
+                    style={[
+                      styles.conversationOptionIndicator,
+                      active && styles.conversationOptionIndicatorSelected,
+                    ]}
+                  >
+                    {active ? (
+                      <Icon name="checkmark" size={12} color="#211a4a" />
+                    ) : null}
+                  </View>
+                  <View style={styles.conversationOptionCopy}>
+                    <Text
+                      style={[
+                        styles.conversationOptionLabel,
+                        active && styles.conversationOptionLabelSelected,
+                      ]}
+                    >
+                      {option.label}
+                    </Text>
+                    {option.description ? (
+                      <Text style={styles.conversationOptionDescription}>
+                        {option.description}
+                      </Text>
+                    ) : null}
+                  </View>
+                </Pressable>
+              );
+            })}
+          </View>
+        </View>
+      ))}
+      {pending && selectedOther ? (
+        <View style={styles.conversationCustomAnswer}>
+          <Text style={styles.conversationCustomAnswerLabel}>Your answer</Text>
+          <TextInput
+            value={customAnswer}
+            onChangeText={setCustomAnswer}
+            editable={!disabled}
+            autoFocus
+            multiline
+            maxLength={12000}
+            placeholder="Type a custom answer…"
+            placeholderTextColor={colors.textDim}
+            style={styles.conversationCustomAnswerInput}
+          />
+        </View>
+      ) : null}
+      {pending ? (
+        <>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Send selected answer to agent"
+            disabled={!complete || disabled}
+            onPress={submit}
+            style={({ pressed }) => [
+              styles.conversationAnswerButton,
+              (!complete || disabled) && styles.conversationAnswerButtonDisabled,
+              pressed && complete && !disabled && styles.pressed,
+            ]}
+          >
+            {disabled ? (
+              <ActivityIndicator size="small" color="#211a4a" />
+            ) : (
+              <>
+                <Text style={styles.conversationAnswerButtonText}>Send answer</Text>
+                <Icon name="arrow-forward" size={15} color="#211a4a" />
+              </>
+            )}
+          </Pressable>
+          {feedback ? (
+            <Text style={styles.conversationAnswerFeedback}>{feedback}</Text>
+          ) : null}
+        </>
+      ) : question.answer ? (
+        <Text numberOfLines={3} style={styles.conversationQuestionAnswer}>
+          {question.answer}
+        </Text>
+      ) : null}
+    </View>
+  );
+}
+
+function ConversationMessageRow({
+  message,
+  answering,
+  answerFeedback,
+  onAnswer,
+}: {
+  message: ConversationMessage;
+  answering: boolean;
+  answerFeedback: string;
+  onAnswer: (
+    question: ConversationQuestion,
+    selected: Record<string, string[]>,
+    customAnswer: string,
+  ) => void;
+}) {
+  if (message.kind === 'tool' && message.tool) {
+    return <ConversationToolCard tool={message.tool} />;
+  }
+  if (message.kind === 'question' && message.question) {
+    return (
+      <ConversationQuestionCard
+        question={message.question}
+        disabled={answering}
+        feedback={answerFeedback}
+        onAnswer={onAnswer}
+      />
+    );
+  }
+  if (message.kind === 'event') {
+    return (
+      <View style={styles.conversationEvent}>
+        <Text style={styles.conversationEventText}>{message.text}</Text>
+      </View>
+    );
+  }
+  if (message.kind === 'user') {
+    return (
+      <View style={styles.conversationUserRow}>
+        <View style={styles.conversationUserBubble}>
+          <Text selectable style={styles.conversationUserText}>
+            {message.text}
+          </Text>
+          {message.delivery ? (
+            <Text style={styles.conversationUserDelivery}>
+              {message.delivery === 'sending' ? 'Sending…' : 'Queued'}
+            </Text>
+          ) : null}
+        </View>
+      </View>
+    );
+  }
+  return (
+    <View style={styles.conversationAgentRow}>
+      <View style={styles.conversationAgentAvatar}>
+        <Image source={loomIcon} resizeMode="cover" style={styles.conversationAgentAvatarImage} />
+      </View>
+      <View style={styles.conversationAgentBody}>
+        <Markdown mergeStyle style={conversationMarkdownStyles}>
+          {message.text || ''}
+        </Markdown>
+      </View>
+    </View>
+  );
+}
+
+function ConversationView({
+  feed,
+  loading,
+  error,
+  online,
+  working,
+  optimisticActivity,
+  answering,
+  answerFeedback,
+  keyboardVisible,
+  onLoadMore,
+  onAnswer,
+}: {
+  feed: ConversationFeed | null;
+  loading: boolean;
+  error: string;
+  online: boolean;
+  working: boolean;
+  optimisticActivity: OptimisticActivity;
+  answering: boolean;
+  answerFeedback: string;
+  keyboardVisible: boolean;
+  onLoadMore: () => void;
+  onAnswer: (
+    question: ConversationQuestion,
+    selected: Record<string, string[]>,
+    customAnswer: string,
+  ) => void;
+}) {
+  const listRef = useRef<FlatList<ConversationMessage>>(null);
+  const stickToLatestRef = useRef(true);
+  const initialScrollPendingRef = useRef(true);
+  const sessionRef = useRef('');
+  const [atLatest, setAtLatest] = useState(true);
+  const messages = feed?.messages || [];
+
+  useEffect(() => {
+    const sessionId = feed?.session_id || '';
+    if (!sessionId || sessionRef.current === sessionId) return;
+    sessionRef.current = sessionId;
+    stickToLatestRef.current = true;
+    initialScrollPendingRef.current = true;
+    setAtLatest(true);
+    requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: false }));
+  }, [feed?.session_id]);
+
+  useEffect(() => {
+    if (!messages.length || !stickToLatestRef.current) return;
+    requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: false }));
+  }, [feed?.updated_at, messages.length]);
+
+  useEffect(() => {
+    if (!keyboardVisible || !messages.length) return;
+    stickToLatestRef.current = true;
+    initialScrollPendingRef.current = false;
+    setAtLatest(true);
+    requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: true }));
+  }, [keyboardVisible, messages.length]);
+
+  const empty = error ? (
+    <EmptyState
+      icon="warning-outline"
+      title="Conversation unavailable"
+      detail={error}
+    />
+  ) : loading ? (
+    <View style={styles.conversationLoading}>
+      <ActivityIndicator color={colors.primary} />
+      <Text style={styles.conversationLoadingText}>Loading conversation…</Text>
+    </View>
+  ) : feed && !feed.available ? (
+    <EmptyState
+      icon="chatbubble-ellipses-outline"
+      title="No structured transcript"
+      detail="This session has terminal output only. Open Terminal to follow it directly."
+    />
+  ) : (
+    <EmptyState
+      icon="chatbubble-outline"
+      title="No messages yet"
+      detail={online ? 'The agent is ready for a follow-up.' : 'Start the agent to begin.'}
+    />
+  );
+
+  return (
+    <View style={styles.conversation}>
+      <FlatList
+        ref={listRef}
+        data={messages}
+        keyExtractor={(item) => item.id}
+        renderItem={({ item }) => (
+          <ConversationMessageRow
+            message={item}
+            answering={answering}
+            answerFeedback={answerFeedback}
+            onAnswer={onAnswer}
+          />
+        )}
+        keyboardDismissMode="interactive"
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator
+        initialNumToRender={18}
+        maxToRenderPerBatch={16}
+        windowSize={7}
+        maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
+        style={styles.conversationList}
+        contentContainerStyle={[
+          styles.conversationListContent,
+          !messages.length && styles.conversationListContentEmpty,
+        ]}
+        ListEmptyComponent={empty}
+        ListHeaderComponent={
+          feed?.has_more ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Load earlier conversation messages"
+              onPress={onLoadMore}
+              style={({ pressed }) => [
+                styles.conversationLoadEarlier,
+                pressed && styles.pressed,
+              ]}
+            >
+              <Icon name="time-outline" size={14} color={colors.primary} />
+              <Text style={styles.conversationLoadEarlierText}>
+                Load earlier · {Math.max(0, feed.total - messages.length)} remaining
+              </Text>
+            </Pressable>
+          ) : null
+        }
+        ListFooterComponent={
+          working ? (
+            <View style={styles.conversationWorking}>
+              <ActivityIndicator size="small" color={colors.green} />
+              <Text style={styles.conversationWorkingText}>Agent is working</Text>
+            </View>
+          ) : optimisticActivity === 'sending' ||
+            optimisticActivity === 'forcing' ? (
+            <View style={styles.conversationWorking}>
+              <ActivityIndicator size="small" color={colors.amber} />
+              <Text style={styles.conversationActivityText}>
+                {optimisticActivity === 'forcing'
+                  ? 'Forcing queued message…'
+                  : 'Sending message…'}
+              </Text>
+            </View>
+          ) : optimisticActivity === 'queued' ? (
+            <View style={styles.conversationWorking}>
+              <Icon name="time-outline" size={15} color={colors.amber} />
+              <Text style={styles.conversationActivityText}>
+                Queued · tap the flash to send now
+              </Text>
+            </View>
+          ) : online ? (
+            <View style={styles.conversationWorking}>
+              <Icon name="checkmark-circle-outline" size={15} color={colors.green} />
+              <Text style={styles.conversationWorkingText}>Agent ready</Text>
+            </View>
+          ) : null
+        }
+        onContentSizeChange={() => {
+          if (!initialScrollPendingRef.current && !stickToLatestRef.current) return;
+          listRef.current?.scrollToEnd({ animated: false });
+          if (initialScrollPendingRef.current) {
+            setTimeout(() => {
+              initialScrollPendingRef.current = false;
+            }, 120);
+          }
+        }}
+        onScroll={(event) => {
+          if (initialScrollPendingRef.current) return;
+          const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+          const distance =
+            contentSize.height - layoutMeasurement.height - contentOffset.y;
+          const nextAtLatest = distance < 72;
+          stickToLatestRef.current = nextAtLatest;
+          setAtLatest(nextAtLatest);
+        }}
+        scrollEventThrottle={80}
+      />
+      {!atLatest && messages.length ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Jump to latest conversation message"
+          onPress={() => {
+            stickToLatestRef.current = true;
+            setAtLatest(true);
+            listRef.current?.scrollToEnd({ animated: true });
+          }}
+          style={({ pressed }) => [
+            styles.conversationLatest,
+            pressed && styles.pressed,
+          ]}
+        >
+          <Icon name="arrow-down" size={15} color="#211a4a" />
+          <Text style={styles.conversationLatestText}>Latest</Text>
+        </Pressable>
+      ) : null}
+    </View>
+  );
+}
+
 function LoomApp() {
   const { width } = useWindowDimensions();
   const isCompact = width < 820;
@@ -1745,7 +2311,17 @@ function LoomApp() {
   const [sessions, setSessions] = useState<SessionList | null>(null);
   const [diff, setDiff] = useState<TaskDiff | null>(null);
   const [capture, setCapture] = useState<TerminalCapture | null>(null);
-  const [tab, setTab] = useState<Tab>('activity');
+  const [conversation, setConversation] = useState<ConversationFeed | null>(null);
+  const [conversationLoading, setConversationLoading] = useState(false);
+  const [conversationError, setConversationError] = useState('');
+  const [conversationAnswerFeedback, setConversationAnswerFeedback] = useState('');
+  const [pendingConversationMessages, setPendingConversationMessages] = useState<
+    ConversationMessage[]
+  >([]);
+  const [optimisticActivity, setOptimisticActivity] =
+    useState<OptimisticActivity>(null);
+  const [liveWorking, setLiveWorking] = useState<boolean | null>(null);
+  const [tab, setTab] = useState<Tab>('conversation');
   const [query, setQuery] = useState('');
   const [message, setMessage] = useState('');
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
@@ -1756,6 +2332,8 @@ function LoomApp() {
   const [appActive, setAppActive] = useState(AppState.currentState === 'active');
   const [tasksLoading, setTasksLoading] = useState(false);
   const [actionBusy, setActionBusy] = useState(false);
+  const [forceSendReady, setForceSendReady] = useState(false);
+  const [forceSendFeedback, setForceSendFeedback] = useState('');
   const [connectionError, setConnectionError] = useState('');
   const [taskListError, setTaskListError] = useState('');
   const [taskError, setTaskError] = useState('');
@@ -1770,19 +2348,54 @@ function LoomApp() {
   const [terminalStreamState, setTerminalStreamState] =
     useState<TerminalStreamState>('connecting');
   const [keyboardVisible, setKeyboardVisible] = useState(false);
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
   const [terminalFocused, setTerminalFocused] = useState(false);
   const [terminalBlurRequest, setTerminalBlurRequest] = useState(0);
   const selectedRef = useRef({ projectId: '', slug: '' });
   const captureLinesRef = useRef(180);
+  const conversationLimitRef = useRef(INITIAL_CONVERSATION_MESSAGES);
+  const conversationRequestRef = useRef(0);
+  const conversationInFlightRef = useRef('');
   const tasksRequestRef = useRef(0);
   const terminalTargetRef = useRef('');
   const terminalKeyQueueRef = useRef<Promise<void>>(Promise.resolve());
   const terminalKeyPendingRef = useRef(0);
   const terminalKeyGenerationRef = useRef(0);
+  const forceSendTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const activityTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const selectedProject = projects.find((project) => project.id === projectId) || null;
   const selectedTask = tasks.find((task) => task.slug === selectedSlug) || null;
   const running = Boolean(detail?.claude?.agent_running || sessions?.agent_running);
+  const working = liveWorking ?? Boolean(conversation?.working);
+  const displayedConversation = useMemo<ConversationFeed | null>(() => {
+    if (!pendingConversationMessages.length) return conversation;
+    const base: ConversationFeed = conversation || {
+      ok: true,
+      available: true,
+      online: running,
+      working: false,
+      session_id: `local:${projectId}:${selectedSlug}`,
+      messages: [],
+      total: 0,
+      has_more: false,
+    };
+    return {
+      ...base,
+      available: true,
+      messages: [...base.messages, ...pendingConversationMessages],
+      total: base.total + pendingConversationMessages.length,
+      updated_at:
+        pendingConversationMessages[pendingConversationMessages.length - 1]
+          ?.created_at || base.updated_at,
+    };
+  }, [
+    conversation,
+    pendingConversationMessages,
+    projectId,
+    running,
+    selectedSlug,
+  ]);
   const target = agentTarget(detail, sessions);
   terminalTargetRef.current = target;
   const keyboardFocusMode = isCompact && keyboardVisible && tab === 'activity';
@@ -1916,6 +2529,101 @@ function LoomApp() {
     [client],
   );
 
+  const loadConversation = useCallback(
+    async (showLoading = false, updateOnly = false) => {
+      const current = selectedRef.current;
+      if (!current.projectId || !current.slug) {
+        setConversation(null);
+        setConversationError('');
+        setConversationAnswerFeedback('');
+        setPendingConversationMessages([]);
+        setOptimisticActivity(null);
+        setConversationLoading(false);
+        return;
+      }
+      const requestKey = `${current.projectId}:${current.slug}`;
+      if (conversationInFlightRef.current === requestKey) return;
+      conversationInFlightRef.current = requestKey;
+      const requestId = ++conversationRequestRef.current;
+      if (showLoading) setConversationLoading(true);
+      try {
+        const nextConversation = await client.conversation(
+          current.projectId,
+          current.slug,
+          updateOnly ? 20 : conversationLimitRef.current,
+        );
+        if (
+          conversationRequestRef.current !== requestId ||
+          selectedRef.current.projectId !== current.projectId ||
+          selectedRef.current.slug !== current.slug
+        ) {
+          return;
+        }
+        setConversation((existing) => {
+          if (
+            !updateOnly ||
+            !existing ||
+            existing.session_id !== nextConversation.session_id
+          ) {
+            return nextConversation;
+          }
+          const updates = new Map(
+            nextConversation.messages.map((item) => [item.id, item]),
+          );
+          const merged = existing.messages.map(
+            (item) => updates.get(item.id) || item,
+          );
+          const existingIds = new Set(merged.map((item) => item.id));
+          for (const item of nextConversation.messages) {
+            if (!existingIds.has(item.id)) merged.push(item);
+          }
+          return {
+            ...existing,
+            ...nextConversation,
+            messages: merged,
+            has_more: existing.has_more || nextConversation.has_more,
+          };
+        });
+        const recentUserMessages = nextConversation.messages
+          .slice(-80)
+          .filter((item) => item.kind === 'user' && item.text);
+        setPendingConversationMessages((current) =>
+          current.filter(
+            (pending) =>
+              !recentUserMessages.some(
+                (serverMessage) =>
+                  serverMessage.text?.trim() === pending.text?.trim(),
+              ),
+          ),
+        );
+        if (nextConversation.working) {
+          setOptimisticActivity(null);
+          if (activityTimerRef.current) {
+            clearTimeout(activityTimerRef.current);
+            activityTimerRef.current = null;
+          }
+        }
+        setConversationError('');
+      } catch (error) {
+        if (
+          conversationRequestRef.current === requestId &&
+          selectedRef.current.projectId === current.projectId &&
+          selectedRef.current.slug === current.slug
+        ) {
+          setConversationError(error instanceof Error ? error.message : String(error));
+        }
+      } finally {
+        if (conversationInFlightRef.current === requestKey) {
+          conversationInFlightRef.current = '';
+        }
+        if (conversationRequestRef.current === requestId) {
+          setConversationLoading(false);
+        }
+      }
+    },
+    [client],
+  );
+
   useEffect(() => {
     let cancelled = false;
     void AsyncStorage.multiGet([
@@ -1934,8 +2642,12 @@ function LoomApp() {
         const savedProject = values[SELECTED_PROJECT_KEY]?.trim();
         if (savedProject) setProjectId(savedProject);
         const savedTab = values[SELECTED_TAB_KEY];
-        if (savedTab === 'activity' || savedTab === 'changes' || savedTab === 'notes') {
+        if (savedTab === 'conversation' || savedTab === 'changes' || savedTab === 'notes') {
           setTab(savedTab);
+        } else if (savedTab === 'activity') {
+          // Existing installs used Activity for the raw terminal. Migrate them
+          // to the new conversation-first home while keeping Terminal available.
+          setTab('conversation');
         }
         const savedGateway = values[GATEWAY_URL_KEY]?.trim().replace(/\/+$/, '');
         if (
@@ -1987,13 +2699,29 @@ function LoomApp() {
   useEffect(() => {
     const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
     const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
-    const showSubscription = Keyboard.addListener(showEvent, () => setKeyboardVisible(true));
-    const hideSubscription = Keyboard.addListener(hideEvent, () => setKeyboardVisible(false));
+    const showSubscription = Keyboard.addListener(showEvent, (event) => {
+      setKeyboardVisible(true);
+      setKeyboardHeight(
+        Platform.OS === 'ios' ? Math.max(0, event.endCoordinates.height) : 0,
+      );
+    });
+    const hideSubscription = Keyboard.addListener(hideEvent, () => {
+      setKeyboardVisible(false);
+      setKeyboardHeight(0);
+    });
     return () => {
       showSubscription.remove();
       hideSubscription.remove();
     };
   }, []);
+
+  useEffect(
+    () => () => {
+      if (forceSendTimerRef.current) clearTimeout(forceSendTimerRef.current);
+      if (activityTimerRef.current) clearTimeout(activityTimerRef.current);
+    },
+    [],
+  );
 
   useEffect(() => {
     setSelectedSlug('');
@@ -2002,6 +2730,11 @@ function LoomApp() {
     setSessions(null);
     setDiff(null);
     setCapture(null);
+    setConversation(null);
+    setConversationError('');
+    setConversationAnswerFeedback('');
+    setPendingConversationMessages([]);
+    setOptimisticActivity(null);
     setTaskListError('');
     setTaskError('');
     void loadTasks(projectId);
@@ -2010,17 +2743,36 @@ function LoomApp() {
   useEffect(() => {
     selectedRef.current = { projectId, slug: selectedSlug };
     captureLinesRef.current = 180;
+    conversationLimitRef.current = INITIAL_CONVERSATION_MESSAGES;
+    conversationRequestRef.current += 1;
     setCaptureLines(180);
     setDetail(null);
     setSessions(null);
     setDiff(null);
     setCapture(null);
+    setConversation(null);
+    setConversationError('');
+    setConversationAnswerFeedback('');
+    setPendingConversationMessages([]);
+    setOptimisticActivity(null);
+    setLiveWorking(null);
+    setConversationLoading(Boolean(projectId && selectedSlug));
     setTerminalKeyError('');
     setLastTerminalKey(null);
     setTerminalKeysOpen(false);
     setTerminalFullscreen(false);
     setTerminalStreamState('connecting');
     setTerminalFocused(false);
+    setForceSendReady(false);
+    setForceSendFeedback('');
+    if (forceSendTimerRef.current) {
+      clearTimeout(forceSendTimerRef.current);
+      forceSendTimerRef.current = null;
+    }
+    if (activityTimerRef.current) {
+      clearTimeout(activityTimerRef.current);
+      activityTimerRef.current = null;
+    }
     terminalKeyGenerationRef.current += 1;
     terminalKeyQueueRef.current = Promise.resolve();
   }, [projectId, selectedSlug]);
@@ -2033,12 +2785,59 @@ function LoomApp() {
   }, [appActive, loadSelected, projectId, selectedSlug]);
 
   useEffect(() => {
+    if (!projectId || !selectedSlug || !appActive) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const poll = async (initial: boolean) => {
+      await loadConversation(initial, !initial);
+      if (!cancelled) {
+        timer = setTimeout(() => void poll(false), 600);
+      }
+    };
+    void poll(true);
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [appActive, loadConversation, projectId, selectedSlug]);
+
+  useEffect(() => {
+    if (!appActive || !running || !target) {
+      setLiveWorking(null);
+      return;
+    }
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const poll = async () => {
+      try {
+        const snapshot = await client.capture(target, 35);
+        if (!cancelled) {
+          setLiveWorking(AGENT_WORKING_PATTERN.test(snapshot.text || ''));
+        }
+      } catch {
+        // Keep the last known state through a transient network failure.
+      }
+      if (!cancelled) timer = setTimeout(() => void poll(), 400);
+    };
+    void poll();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [appActive, client, running, target]);
+
+  useEffect(() => {
     if (!isCompact) setProjectPickerOpen(false);
   }, [isCompact]);
 
   const refreshAll = useCallback(async () => {
-    await Promise.all([loadProjects(), loadTasks(projectId), loadSelected(true)]);
-  }, [loadProjects, loadSelected, loadTasks, projectId]);
+    await Promise.all([
+      loadProjects(),
+      loadTasks(projectId),
+      loadSelected(true),
+      loadConversation(true),
+    ]);
+  }, [loadConversation, loadProjects, loadSelected, loadTasks, projectId]);
 
   const loadOlderCapture = useCallback(() => {
     const nextLines = Math.min(captureLinesRef.current * 2, MAX_CAPTURE_LINES);
@@ -2047,6 +2846,16 @@ function LoomApp() {
     setCaptureLines(nextLines);
     void loadSelected(false);
   }, [loadSelected]);
+
+  const loadOlderConversation = useCallback(() => {
+    const nextLimit = Math.min(
+      conversationLimitRef.current * 2,
+      MAX_CONVERSATION_MESSAGES,
+    );
+    if (nextLimit === conversationLimitRef.current) return;
+    conversationLimitRef.current = nextLimit;
+    void loadConversation(true);
+  }, [loadConversation]);
 
   const sendTerminalKey = useCallback(
     (key: TerminalKey) => {
@@ -2110,6 +2919,11 @@ function LoomApp() {
       setSessions(null);
       setDiff(null);
       setCapture(null);
+      setConversation(null);
+      setConversationError('');
+      setConversationAnswerFeedback('');
+      setPendingConversationMessages([]);
+      setOptimisticActivity(null);
       setTaskError('');
       setProjectId(nextProjectId);
     },
@@ -2205,7 +3019,7 @@ function LoomApp() {
           await client.stopAgent(projectId, selectedSlug);
         }
         await new Promise((resolve) => setTimeout(resolve, 600));
-        await loadSelected(true);
+        await Promise.all([loadSelected(true), loadConversation(true)]);
         await loadTasks(projectId);
       } catch (error) {
         setTaskError(error instanceof Error ? error.message : String(error));
@@ -2213,24 +3027,234 @@ function LoomApp() {
         setActionBusy(false);
       }
     },
-    [client, loadSelected, loadTasks, projectId, selectedSlug],
+    [client, loadConversation, loadSelected, loadTasks, projectId, selectedSlug],
   );
+
+  const armOptimisticActivity = useCallback(
+    (activity: Exclude<OptimisticActivity, null>) => {
+      setOptimisticActivity(activity);
+      if (activityTimerRef.current) clearTimeout(activityTimerRef.current);
+      activityTimerRef.current = setTimeout(() => {
+        setOptimisticActivity(null);
+        activityTimerRef.current = null;
+      }, 10000);
+    },
+    [],
+  );
+
+  const refreshConversationBurst = useCallback(() => {
+    void (async () => {
+      for (const delay of [0, 250, 500, 1000]) {
+        if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+        await loadConversation(false, true);
+      }
+    })();
+  }, [loadConversation]);
+
+  const armForceSend = useCallback(() => {
+    setForceSendReady(true);
+    if (forceSendTimerRef.current) clearTimeout(forceSendTimerRef.current);
+    forceSendTimerRef.current = setTimeout(() => {
+      setForceSendReady(false);
+      forceSendTimerRef.current = null;
+    }, 12000);
+  }, []);
 
   const sendMessage = useCallback(async () => {
     const text = message.trim();
     if (!text || !projectId || !selectedSlug) return;
+    const queuedBehindActiveTurn =
+      selectedTask?.agent === 'cursor' && working;
+    setForceSendFeedback('');
+    const localId = `local:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+    const optimisticMessage: ConversationMessage = {
+      id: localId,
+      kind: 'user',
+      text,
+      created_at: Date.now(),
+      delivery: 'sending',
+    };
+    setPendingConversationMessages((current) => [...current, optimisticMessage]);
+    setMessage('');
+    armOptimisticActivity('sending');
     setActionBusy(true);
     setTaskError('');
     try {
       await client.sendMessage(projectId, selectedSlug, text);
-      setMessage('');
+      setPendingConversationMessages((current) =>
+        current.map((item) =>
+          item.id === localId
+            ? {
+                ...item,
+                delivery: queuedBehindActiveTurn ? 'queued' : 'sending',
+              }
+            : item,
+        ),
+      );
+      armOptimisticActivity(
+        queuedBehindActiveTurn ? 'queued' : 'sending',
+      );
+      if (queuedBehindActiveTurn && terminalTargetRef.current) {
+        armForceSend();
+      }
+      refreshConversationBurst();
       setTimeout(() => void loadSelected(false), 500);
     } catch (error) {
+      setPendingConversationMessages((current) =>
+        current.filter((item) => item.id !== localId),
+      );
+      setMessage((current) => current || text);
+      setOptimisticActivity(null);
+      if (activityTimerRef.current) {
+        clearTimeout(activityTimerRef.current);
+        activityTimerRef.current = null;
+      }
       setTaskError(error instanceof Error ? error.message : String(error));
     } finally {
       setActionBusy(false);
     }
-  }, [client, loadSelected, message, projectId, selectedSlug]);
+  }, [
+    armForceSend,
+    armOptimisticActivity,
+    client,
+    loadSelected,
+    message,
+    projectId,
+    refreshConversationBurst,
+    selectedSlug,
+    selectedTask?.agent,
+    working,
+  ]);
+
+  const forceQueuedMessage = useCallback(async () => {
+    if (
+      !forceSendReady ||
+      !projectId ||
+      !selectedSlug ||
+      selectedTask?.agent !== 'cursor' ||
+      actionBusy
+    ) {
+      return;
+    }
+    setActionBusy(true);
+    setTaskError('');
+    setForceSendFeedback('Sending queued message now…');
+    armOptimisticActivity('forcing');
+    setForceSendReady(false);
+    if (forceSendTimerRef.current) {
+      clearTimeout(forceSendTimerRef.current);
+      forceSendTimerRef.current = null;
+    }
+    try {
+      const result = await client.forceSendMessage(projectId, selectedSlug);
+      setForceSendFeedback(
+        result.working
+          ? 'Queued message sent now.'
+          : 'Force command delivered to Cursor.',
+      );
+      refreshConversationBurst();
+      setTimeout(() => void loadSelected(false), 350);
+    } catch (error) {
+      setOptimisticActivity(null);
+      if (activityTimerRef.current) {
+        clearTimeout(activityTimerRef.current);
+        activityTimerRef.current = null;
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      setForceSendFeedback(message);
+      setTaskError(message);
+    } finally {
+      setActionBusy(false);
+    }
+  }, [
+    actionBusy,
+    armOptimisticActivity,
+    client,
+    forceSendReady,
+    loadSelected,
+    projectId,
+    refreshConversationBurst,
+    selectedSlug,
+    selectedTask?.agent,
+  ]);
+
+  const sendConversationAnswer = useCallback(
+    async (
+      question: ConversationQuestion,
+      selected: Record<string, string[]>,
+      customAnswer: string,
+    ) => {
+      if (!projectId || !selectedSlug || actionBusy) return;
+      const answers = question.questions.map((item) => ({
+        prompt: item.prompt,
+        values: (selected[item.id] || []).map((value) => {
+          const option = item.options.find((candidate) => candidate.value === value);
+          return option && /^other\b/i.test(option.label.trim()) && customAnswer
+            ? customAnswer
+            : value;
+        }),
+      }));
+      const text =
+        answers.length === 1
+          ? answers[0].values.join(', ')
+          : answers
+              .map((item) => `${item.prompt}\n${item.values.join(', ')}`)
+              .join('\n\n');
+      if (!text) return;
+      setActionBusy(true);
+      setTaskError('');
+      setConversationAnswerFeedback('');
+      armOptimisticActivity('sending');
+      try {
+        if (question.source === 'terminal' && question.id) {
+          const selectedIds = question.questions.flatMap((item) => {
+            const values = new Set(selected[item.id] || []);
+            return item.options
+              .filter((option) => values.has(option.value))
+              .map((option) => option.id);
+          });
+          const result = await client.answerConversationQuestion(
+            projectId,
+            selectedSlug,
+            question.id,
+            selectedIds,
+            customAnswer,
+          );
+          setConversationAnswerFeedback(
+            result.pending
+              ? 'Selection reached tmux, but the menu is still open. Review it and send again.'
+              : 'Answer submitted.',
+          );
+          if (result.pending) armOptimisticActivity('queued');
+        } else {
+          await client.sendMessage(projectId, selectedSlug, text);
+          setConversationAnswerFeedback('Answer submitted.');
+        }
+        refreshConversationBurst();
+        setTimeout(() => void loadSelected(false), 350);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setOptimisticActivity(null);
+        if (activityTimerRef.current) {
+          clearTimeout(activityTimerRef.current);
+          activityTimerRef.current = null;
+        }
+        setTaskError(message);
+        setConversationAnswerFeedback(message);
+      } finally {
+        setActionBusy(false);
+      }
+    },
+    [
+      actionBusy,
+      armOptimisticActivity,
+      client,
+      loadSelected,
+      projectId,
+      refreshConversationBurst,
+      selectedSlug,
+    ],
+  );
 
   const filteredTasks = tasks.filter((task) => {
     const needle = query.trim().toLowerCase();
@@ -2461,10 +3485,14 @@ function LoomApp() {
   );
 
   const taskPane = selectedTask ? (
-    <KeyboardAvoidingView
-      behavior={Platform.OS === 'ios' ? 'height' : undefined}
-      enabled={isCompact}
-      style={styles.taskPane}
+    <View
+      style={[
+        styles.taskPane,
+        isCompact &&
+          keyboardHeight > 0 && {
+            paddingBottom: keyboardHeight,
+          },
+      ]}
     >
       {!keyboardFocusMode && !terminalFullscreen && (
       <>
@@ -2494,7 +3522,12 @@ function LoomApp() {
               <Text numberOfLines={1} style={styles.taskHeroTitle}>
                 {selectedTask.title || selectedTask.slug}
               </Text>
-              {!isCompact && <StatusPill running={running} />}
+              {!isCompact && (
+                <StatusPill
+                  running={working}
+                  label={working ? 'Working' : running ? 'Ready' : 'Stopped'}
+                />
+              )}
             </View>
             <Text numberOfLines={1} style={styles.taskHeroGoal}>
               {selectedTask.general_goal || selectedTask.slug}
@@ -2507,7 +3540,10 @@ function LoomApp() {
             iconOnly={isCompact}
             label="Refresh"
             icon="refresh-outline"
-            onPress={() => void loadSelected(true)}
+            onPress={() => {
+              void loadSelected(true);
+              void loadConversation(true);
+            }}
             disabled={actionBusy}
           />
           <ActionButton
@@ -2525,7 +3561,8 @@ function LoomApp() {
       <View style={styles.tabs}>
         {(
           [
-            ['activity', 'Activity', 'chatbubble-ellipses-outline'],
+            ['conversation', 'Chat', 'chatbubble-ellipses-outline'],
+            ['activity', 'Terminal', 'terminal-outline'],
             ['changes', 'Changes', 'git-compare-outline'],
             ['notes', 'Notes', 'reader-outline'],
           ] as Array<[Tab, string, IconName]>
@@ -2553,6 +3590,26 @@ function LoomApp() {
         <View style={styles.errorBanner}>
           <Icon name="warning-outline" color={colors.red} />
           <Text style={styles.errorText}>{taskError}</Text>
+        </View>
+      ) : null}
+
+      {tab === 'conversation' ? (
+        <View style={styles.conversationContent}>
+          <ConversationView
+            feed={displayedConversation}
+            loading={conversationLoading}
+            error={conversationError}
+            online={running}
+            working={working}
+            optimisticActivity={optimisticActivity}
+            answering={actionBusy}
+            answerFeedback={conversationAnswerFeedback}
+            keyboardVisible={keyboardVisible}
+            onLoadMore={loadOlderConversation}
+            onAnswer={(question, selected, customAnswer) =>
+              void sendConversationAnswer(question, selected, customAnswer)
+            }
+          />
         </View>
       ) : null}
 
@@ -2590,6 +3647,7 @@ function LoomApp() {
           <ActivityView
             capture={capture}
             running={running}
+            working={working}
             target={target}
             gatewayUrl={gatewayUrl}
             gatewayAuthToken={DEFAULT_GATEWAY_AUTH_TOKEN}
@@ -2610,7 +3668,7 @@ function LoomApp() {
             onStreamStateChange={setTerminalStreamState}
           />
       </View>
-      {tab !== 'activity' ? (
+      {tab === 'changes' || tab === 'notes' ? (
         <ScrollView
           automaticallyAdjustKeyboardInsets
           contentInsetAdjustmentBehavior="automatic"
@@ -2625,9 +3683,11 @@ function LoomApp() {
         </ScrollView>
       ) : null}
 
-      {tab === 'activity' && !terminalKeyboardFocusMode && !terminalFullscreen && (
+      {(tab === 'conversation' || tab === 'activity') &&
+        !terminalKeyboardFocusMode &&
+        !terminalFullscreen && (
         <View style={[styles.composerShell, isCompact && styles.composerShellCompact]}>
-          {terminalKeysOpen ? (
+          {tab === 'activity' && terminalKeysOpen ? (
             <TerminalKeyboard
               disabled={!target || terminalStreamState !== 'live'}
               disabledReason={
@@ -2643,23 +3703,29 @@ function LoomApp() {
               onKey={sendTerminalKey}
             />
           ) : null}
-          <View style={styles.composer}>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={terminalKeysOpen ? 'Hide terminal keys' : 'Show terminal keys'}
-              onPress={() => setTerminalKeysOpen((current) => !current)}
-              style={({ pressed }) => [
-                styles.composerKeysButton,
-                terminalKeysOpen && styles.composerKeysButtonActive,
-                pressed && styles.pressed,
-              ]}
-            >
-              <Icon
-                name="keypad-outline"
-                size={18}
-                color={terminalKeysOpen ? colors.primary : colors.textMuted}
-              />
-            </Pressable>
+          <View style={[styles.composer, !running && styles.composerOffline]}>
+            {tab === 'activity' ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={terminalKeysOpen ? 'Hide terminal keys' : 'Show terminal keys'}
+                onPress={() => setTerminalKeysOpen((current) => !current)}
+                style={({ pressed }) => [
+                  styles.composerKeysButton,
+                  terminalKeysOpen && styles.composerKeysButtonActive,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Icon
+                  name="keypad-outline"
+                  size={18}
+                  color={terminalKeysOpen ? colors.primary : colors.textMuted}
+                />
+              </Pressable>
+            ) : (
+              <View style={styles.composerAgentMark}>
+                <Image source={loomIcon} resizeMode="cover" style={styles.composerAgentMarkImage} />
+              </View>
+            )}
             <TextInput
               value={message}
               onChangeText={setMessage}
@@ -2667,34 +3733,87 @@ function LoomApp() {
               multiline
               maxLength={12000}
               editable={running && !actionBusy}
-              placeholder={running ? 'Message the agent…' : 'Start the agent to send a message'}
+              placeholder={
+                running
+                  ? working
+                    ? 'Steer the running agent…'
+                    : 'Send a follow-up…'
+                  : 'Agent session offline'
+              }
               placeholderTextColor={colors.textDim}
               style={styles.composerInput}
             />
             <Pressable
-              disabled={!running || !message.trim() || actionBusy}
-              onPress={() => void sendMessage()}
+              accessibilityRole="button"
+              accessibilityLabel={
+                forceSendReady && !message.trim()
+                  ? 'Force send queued Cursor follow-up'
+                  : 'Send message to agent'
+              }
+              disabled={
+                !running ||
+                actionBusy ||
+                (!message.trim() && !forceSendReady)
+              }
+              onPress={() => {
+                if (message.trim()) {
+                  void sendMessage();
+                } else {
+                  void forceQueuedMessage();
+                }
+              }}
               style={({ pressed }) => [
                 styles.sendButton,
+                forceSendReady && !message.trim() && styles.sendButtonForce,
                 pressed && styles.pressed,
-                (!running || !message.trim() || actionBusy) && styles.sendButtonDisabled,
+                (
+                  !running ||
+                  actionBusy ||
+                  (!message.trim() && !forceSendReady)
+                ) && styles.sendButtonDisabled,
               ]}
             >
               {actionBusy ? (
                 <ActivityIndicator size="small" color="#211a4a" />
               ) : (
-                <Icon name="arrow-up" color="#211a4a" size={20} />
+                <Icon
+                  name={forceSendReady && !message.trim() ? 'flash' : 'arrow-up'}
+                  color="#211a4a"
+                  size={20}
+                />
               )}
             </Pressable>
           </View>
-          {!isCompact && (
+          {forceSendFeedback ? (
+            <Text style={styles.forceSendFeedback}>{forceSendFeedback}</Text>
+          ) : forceSendReady && !message.trim() ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Send queued Cursor message now"
+              onPress={() => void forceQueuedMessage()}
+              style={({ pressed }) => [
+                styles.forceSendAction,
+                pressed && styles.pressed,
+              ]}
+            >
+              <Icon name="flash" size={13} color={colors.amber} />
+              <Text style={styles.forceSendHint}>Send queued message now</Text>
+            </Pressable>
+          ) : !running ? (
+            <View style={styles.composerOfflineHint}>
+              <Icon name="play-circle-outline" size={13} color={colors.textDim} />
+              <Text style={styles.composerOfflineHintText}>
+                Start this session with the play button above.
+              </Text>
+            </View>
+          ) : !isCompact ? (
             <Text style={styles.composerHint}>
               Loom sends this directly to the active {selectedTask.agent || 'cursor'} session.
             </Text>
-          )}
+          ) : null}
         </View>
       )}
-    </KeyboardAvoidingView>
+    </View>
   ) : (
     <View style={styles.noSelection}>
       <LoomMark compact />
@@ -3258,6 +4377,314 @@ const styles = StyleSheet.create({
   tabSelected: { borderBottomColor: colors.primary },
   tabText: { color: colors.textMuted, fontSize: 12, fontWeight: '600' },
   tabTextSelected: { color: colors.primary },
+  conversationContent: {
+    flex: 1,
+    minHeight: 0,
+    width: '100%',
+    backgroundColor: colors.background,
+  },
+  conversation: { flex: 1, minHeight: 0, position: 'relative' },
+  conversationList: { flex: 1 },
+  conversationListContent: {
+    width: '100%',
+    maxWidth: 900,
+    alignSelf: 'center',
+    paddingHorizontal: 18,
+    paddingTop: 18,
+    paddingBottom: 28,
+  },
+  conversationListContentEmpty: { flexGrow: 1, justifyContent: 'center' },
+  conversationUserRow: {
+    width: '100%',
+    alignItems: 'flex-end',
+    marginBottom: 16,
+    paddingLeft: 44,
+  },
+  conversationUserBubble: {
+    maxWidth: '92%',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 18,
+    borderBottomRightRadius: 5,
+    backgroundColor: colors.primary,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.12,
+    shadowRadius: 5,
+    elevation: 2,
+  },
+  conversationUserText: {
+    color: '#211a4a',
+    fontSize: 15,
+    lineHeight: 21,
+    fontWeight: '600',
+  },
+  conversationUserDelivery: {
+    color: 'rgba(33, 26, 74, 0.62)',
+    fontSize: 9,
+    fontWeight: '800',
+    textAlign: 'right',
+    marginTop: 5,
+  },
+  conversationAgentRow: {
+    width: '100%',
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+    paddingRight: 18,
+    marginBottom: 17,
+  },
+  conversationAgentAvatar: {
+    width: 28,
+    height: 28,
+    marginTop: 1,
+    borderRadius: 9,
+    overflow: 'hidden',
+    backgroundColor: '#f7f5ef',
+    borderWidth: 1,
+    borderColor: '#e9e5dc',
+  },
+  conversationAgentAvatarImage: { width: '100%', height: '100%' },
+  conversationAgentBody: {
+    flex: 1,
+    minWidth: 0,
+    paddingTop: 1,
+  },
+  conversationTool: {
+    marginLeft: 38,
+    marginBottom: 11,
+    borderRadius: 14,
+    overflow: 'hidden',
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.borderSoft,
+  },
+  conversationToolHeader: {
+    minHeight: 62,
+    paddingHorizontal: 11,
+    paddingVertical: 9,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  conversationToolIcon: {
+    width: 32,
+    height: 32,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.primaryMuted,
+    borderWidth: 1,
+    borderColor: '#5b537d',
+  },
+  conversationToolCopy: { flex: 1, minWidth: 0 },
+  conversationToolTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  conversationToolName: {
+    flex: 1,
+    color: colors.text,
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  conversationToolStatus: { flexDirection: 'row', alignItems: 'center', gap: 3 },
+  conversationToolStatusText: { fontSize: 9, fontWeight: '800' },
+  conversationToolSummary: {
+    color: colors.textDim,
+    fontSize: 10,
+    lineHeight: 14,
+    marginTop: 4,
+  },
+  conversationToolDetails: {
+    paddingHorizontal: 11,
+    paddingBottom: 11,
+    borderTopWidth: 1,
+    borderTopColor: colors.borderSoft,
+    backgroundColor: '#17161a',
+  },
+  conversationToolSection: { marginTop: 10 },
+  conversationToolSectionLabel: {
+    color: colors.textDim,
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 0.8,
+    textTransform: 'uppercase',
+    marginBottom: 6,
+  },
+  conversationToolCode: {
+    color: '#dcd7e0',
+    fontSize: 10,
+    lineHeight: 15,
+    fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' }),
+  },
+  conversationQuestion: {
+    marginLeft: 38,
+    marginBottom: 15,
+    padding: 12,
+    borderRadius: 16,
+    backgroundColor: '#24222b',
+    borderWidth: 1,
+    borderColor: '#615987',
+  },
+  conversationQuestionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 9,
+    marginBottom: 12,
+  },
+  conversationQuestionIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: 11,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.primaryMuted,
+  },
+  conversationQuestionHeaderCopy: { flex: 1, minWidth: 0 },
+  conversationQuestionTitle: { color: colors.text, fontSize: 13, fontWeight: '900' },
+  conversationQuestionStatus: { color: colors.primary, fontSize: 9, fontWeight: '700', marginTop: 2 },
+  conversationPrompt: { marginTop: 3, marginBottom: 11 },
+  conversationPromptHeader: {
+    color: colors.primary,
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 0.8,
+    textTransform: 'uppercase',
+    marginBottom: 4,
+  },
+  conversationPromptText: { color: colors.text, fontSize: 13, lineHeight: 19, fontWeight: '700' },
+  conversationPromptHint: { color: colors.textDim, fontSize: 9, marginTop: 4 },
+  conversationOptions: { gap: 7, marginTop: 10 },
+  conversationOption: {
+    minHeight: 48,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 9,
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  conversationOptionSelected: {
+    backgroundColor: colors.primaryMuted,
+    borderColor: colors.primaryStrong,
+  },
+  conversationOptionDisabled: { opacity: 0.6 },
+  conversationOptionIndicator: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#686371',
+  },
+  conversationOptionIndicatorSelected: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
+  },
+  conversationOptionCopy: { flex: 1, minWidth: 0 },
+  conversationOptionLabel: { color: colors.textMuted, fontSize: 11, fontWeight: '700' },
+  conversationOptionLabelSelected: { color: colors.primary },
+  conversationOptionDescription: { color: colors.textDim, fontSize: 9, lineHeight: 13, marginTop: 3 },
+  conversationCustomAnswer: { marginTop: 2, marginBottom: 11 },
+  conversationCustomAnswerLabel: {
+    color: colors.primary,
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 0.7,
+    textTransform: 'uppercase',
+    marginBottom: 6,
+  },
+  conversationCustomAnswerInput: {
+    minHeight: 76,
+    maxHeight: 150,
+    paddingHorizontal: 11,
+    paddingVertical: 9,
+    borderRadius: 12,
+    color: colors.text,
+    fontSize: 12,
+    lineHeight: 18,
+    textAlignVertical: 'top',
+    backgroundColor: colors.background,
+    borderWidth: 1,
+    borderColor: colors.primaryStrong,
+  },
+  conversationAnswerButton: {
+    minHeight: 38,
+    paddingHorizontal: 13,
+    borderRadius: 12,
+    alignSelf: 'flex-end',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    backgroundColor: colors.primary,
+  },
+  conversationAnswerButtonDisabled: { opacity: 0.38 },
+  conversationAnswerButtonText: { color: '#211a4a', fontSize: 10, fontWeight: '900' },
+  conversationAnswerFeedback: {
+    color: colors.amber,
+    fontSize: 9,
+    lineHeight: 14,
+    marginTop: 8,
+    textAlign: 'right',
+  },
+  conversationQuestionAnswer: {
+    color: colors.textDim,
+    fontSize: 10,
+    lineHeight: 15,
+    paddingTop: 3,
+  },
+  conversationEvent: { alignItems: 'center', paddingVertical: 8, marginBottom: 8 },
+  conversationEventText: { color: colors.textDim, fontSize: 10, fontWeight: '700' },
+  conversationLoading: { alignItems: 'center', justifyContent: 'center', gap: 10 },
+  conversationLoadingText: { color: colors.textMuted, fontSize: 11 },
+  conversationLoadEarlier: {
+    minHeight: 34,
+    marginBottom: 18,
+    alignSelf: 'center',
+    paddingHorizontal: 11,
+    borderRadius: 11,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.borderSoft,
+  },
+  conversationLoadEarlierText: { color: colors.primary, fontSize: 10, fontWeight: '800' },
+  conversationWorking: {
+    marginLeft: 38,
+    paddingVertical: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  conversationWorkingText: { color: colors.green, fontSize: 10, fontWeight: '700' },
+  conversationActivityText: { color: colors.amber, fontSize: 10, fontWeight: '700' },
+  conversationLatest: {
+    position: 'absolute',
+    right: 16,
+    bottom: 14,
+    minHeight: 36,
+    paddingHorizontal: 12,
+    borderRadius: 18,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: colors.primary,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.24,
+    shadowRadius: 7,
+    elevation: 5,
+  },
+  conversationLatestText: { color: '#211a4a', fontSize: 10, fontWeight: '900' },
   activityContent: {
     flex: 1,
     minHeight: 0,
@@ -3807,6 +5234,11 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.border,
   },
+  composerOffline: {
+    backgroundColor: colors.card,
+    borderColor: colors.borderSoft,
+    opacity: 0.82,
+  },
   composerKeysButton: {
     width: 34,
     height: 34,
@@ -3816,6 +5248,19 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   composerKeysButtonActive: { backgroundColor: colors.primaryMuted },
+  composerAgentMark: {
+    width: 30,
+    height: 30,
+    marginLeft: 2,
+    marginRight: 7,
+    marginBottom: 2,
+    borderRadius: 9,
+    overflow: 'hidden',
+    backgroundColor: '#f7f5ef',
+    borderWidth: 1,
+    borderColor: '#e9e5dc',
+  },
+  composerAgentMarkImage: { width: '100%', height: '100%' },
   composerInput: {
     flex: 1,
     minHeight: 32,
@@ -3834,7 +5279,52 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     backgroundColor: colors.primary,
   },
+  sendButtonForce: {
+    backgroundColor: colors.amber,
+    shadowColor: colors.amber,
+    shadowOpacity: 0.28,
+    shadowRadius: 7,
+  },
   sendButtonDisabled: { backgroundColor: colors.surface, opacity: 0.55 },
+  forceSendAction: {
+    minHeight: 30,
+    marginTop: 6,
+    paddingHorizontal: 10,
+    borderRadius: 10,
+    alignSelf: 'center',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 5,
+    backgroundColor: colors.amberMuted,
+    borderWidth: 1,
+    borderColor: '#665528',
+  },
+  forceSendHint: {
+    color: colors.amber,
+    fontSize: 9,
+    fontWeight: '800',
+    textAlign: 'center',
+  },
+  forceSendFeedback: {
+    color: colors.textMuted,
+    fontSize: 9,
+    fontWeight: '700',
+    textAlign: 'center',
+    marginTop: 6,
+  },
+  composerOfflineHint: {
+    marginTop: 6,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 5,
+  },
+  composerOfflineHintText: {
+    color: colors.textDim,
+    fontSize: 9,
+    fontWeight: '700',
+  },
   composerHint: {
     color: colors.textDim,
     fontSize: 9,
