@@ -1,4 +1,5 @@
 import type {
+  ActivitySnapshot,
   AgentStartResult,
   ConversationFeed,
   LoomProject,
@@ -27,6 +28,13 @@ export class LoomApiError extends Error {
 
 function normalizeBaseUrl(value: string): string {
   return value.trim().replace(/\/+$/, '');
+}
+
+const LOCAL_HOST_RE =
+  /^https?:\/\/(localhost|127(\.\d+){3}|10(\.\d+){3}|192\.168(\.\d+){2}|172\.(1[6-9]|2\d|3[01])(\.\d+){2})(:\d+)?(\/|$)/i;
+
+export function isLocalGatewayUrl(value: string): boolean {
+  return LOCAL_HOST_RE.test(value.trim());
 }
 
 function scoped(path: string, projectId: string): string {
@@ -81,6 +89,19 @@ export class LoomClient {
   async projects(): Promise<LoomProject[]> {
     const result = await this.request<{ projects?: LoomProject[] }>('/api/projects');
     return result.projects || [];
+  }
+
+  /** Host-wide, so a finish in a project you are not viewing still surfaces. */
+  async activity(): Promise<ActivitySnapshot> {
+    return this.request<ActivitySnapshot>('/api/activity');
+  }
+
+  /** Clears a task's unseen-finish flag once its conversation has been opened. */
+  async ackActivity(projectId: string, slug: string): Promise<{ ok?: boolean }> {
+    return this.request<{ ok?: boolean }>(scoped('/api/activity/ack', projectId), {
+      method: 'POST',
+      body: JSON.stringify({ slug }),
+    });
   }
 
   async addProject(path: string): Promise<{ id: string; projects?: LoomProject[] }> {

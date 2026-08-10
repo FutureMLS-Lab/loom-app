@@ -189,3 +189,24 @@ export type AgentStartResult = {
   agent?: string;
   error?: string;
 };
+
+export type OptimisticActivity = 'sending' | 'queued' | 'forcing' | null;
+
+export type ActivityTask = {
+  project: string;
+  slug: string;
+  working: boolean;
+  /** Epoch seconds of an unacknowledged finish; 0 once seen. */
+  finished_at: number;
+};
+
+export type ActivitySnapshot = {
+  ok?: boolean;
+  tasks?: Record<string, ActivityTask>;
+  projects?: Record<string, { working: number; finished: number }>;
+};
+
+/** Nothing to show, the agent is running, or it finished unseen. */
+export type ActivityPulse = 'idle' | 'working' | 'finished';
+
+export type Tab = 'conversation' | 'activity' | 'changes' | 'notes';
