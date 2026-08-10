@@ -497,6 +497,9 @@ export function ConversationView({
 
   useEffect(() => {
     if (!messages.length || !stickToLatestRef.current) return;
+    // A poll landing mid-gesture must not yank the list out from under the
+    // finger; the drag decides where we end up.
+    if (userDragRef.current) return;
     requestAnimationFrame(() => scrollToLatest(false));
   }, [feed?.updated_at, messages.length, scrollToLatest]);
 
@@ -546,8 +549,11 @@ export function ConversationView({
         initialNumToRender={18}
         maxToRenderPerBatch={16}
         windowSize={7}
+        // Anchoring only matters once the initial layout is done. It must not
+        // switch on scroll position: toggling it mid-gesture re-anchors the
+        // list and reads as the view jumping back on its own.
         maintainVisibleContentPosition={
-          settling || atLatest ? undefined : { minIndexForVisible: 0 }
+          settling ? undefined : { minIndexForVisible: 0 }
         }
         style={styles.conversationList}
         contentContainerStyle={[
@@ -614,6 +620,8 @@ export function ConversationView({
         }}
         onContentSizeChange={() => {
           if (!settlingRef.current && !stickToLatestRef.current) return;
+          // Growing content during a gesture must not steal the scroll either.
+          if (!settlingRef.current && userDragRef.current) return;
           scrollToLatest(false);
           if (settlingRef.current) {
             if (settleTimerRef.current) clearTimeout(settleTimerRef.current);
@@ -625,7 +633,12 @@ export function ConversationView({
         }}
         onScroll={(event) => {
           if (settlingRef.current) return;
-          setAtLatest(distanceFromBottom(event) < AT_LATEST_SLACK);
+          const nextAtLatest = distanceFromBottom(event) < AT_LATEST_SLACK;
+          setAtLatest(nextAtLatest);
+          // Release stickiness the moment a finger moves away from the bottom,
+          // rather than waiting for the gesture to end: a poll that lands in
+          // between would otherwise still count the list as pinned.
+          if (userDragRef.current) stickToLatestRef.current = nextAtLatest;
         }}
         onScrollBeginDrag={() => {
           if (dragTimerRef.current) {
