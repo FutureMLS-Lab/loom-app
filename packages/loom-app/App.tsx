@@ -97,6 +97,7 @@ const AGENT_WORKING_PATTERN =
 const TERMINAL_FONT_SIZE_KEY = 'loom-app:terminal-font-size';
 const SELECTED_PROJECT_KEY = 'loom-app:selected-project';
 const SELECTED_TAB_KEY = 'loom-app:selected-tab';
+const SELECTED_TASK_KEY = 'loom-app:selected-task';
 
 function LoomApp() {
   const { width } = useWindowDimensions();
@@ -136,6 +137,11 @@ function LoomApp() {
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const selectedRef = useRef({ projectId: '', slug: '' });
   const tasksRequestRef = useRef(0);
+  /** `projectId:slug` from the previous session, consumed by the first load. */
+  const restoreTaskRef = useRef('');
+  /** Lets pollers read the active tab without restarting on every switch. */
+  const tabRef = useRef<Tab>('conversation');
+  const terminalLiveRef = useRef(false);
   const forceSendTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activityTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // The loaders are defined below but the hooks need them, so go through refs.
@@ -170,6 +176,15 @@ function LoomApp() {
     sendKey: sendTerminalKey,
     setTaskKey: setTerminalTaskKey,
   } = terminal;
+
+  const sendTerminalCompose = useCallback(
+    async (text: string) => {
+      const pane = terminal.targetRef.current;
+      if (!pane) throw new Error('No active terminal target is available.');
+      await client.sendText(pane, text);
+    },
+    [client, terminal.targetRef],
+  );
 
   // Optimistic composer state lives here, so the feed reports back instead of
   // owning it; both callbacks stay stable for the hook's dependency arrays.
@@ -264,15 +279,21 @@ function LoomApp() {
   ]);
   const target = agentTarget(detail, sessions);
   terminal.targetRef.current = target;
+  tabRef.current = tab;
+  terminalLiveRef.current = terminal.streamState === 'live';
   const selectionKey = projectId && selectedSlug ? `${projectId}:${selectedSlug}` : '';
   const terminalMounted = Boolean(selectionKey) && terminal.taskKey === selectionKey;
   const keyboardFocusMode = isCompact && keyboardVisible && tab === 'activity';
   const terminalKeyboardFocusMode = keyboardFocusMode && terminal.focused;
 
   const loadProjects = useCallback(async () => {
-    const applyProjects = (nextProjects: LoomProject[], baseUrl: string) => {
+    const applyProjects = (
+      nextProjects: LoomProject[],
+      baseUrl: string,
+      persist = true,
+    ) => {
       setProjects(nextProjects);
-      persistGatewayUrl(baseUrl);
+      if (persist) persistGatewayUrl(baseUrl);
       setProjectId((current) => {
         const nextProjectId =
           current && nextProjects.some((project) => project.id === current)
@@ -296,7 +317,9 @@ function LoomApp() {
           await defaultClient.health().catch(() => undefined);
           const fallbackProjects = await defaultClient.projects();
           applyGatewayBaseUrl(defaultClient.baseUrl);
-          applyProjects(fallbackProjects, defaultClient.baseUrl);
+          // Falling back keeps the app usable, but the gateway the user chose
+          // stays saved: a flaky network should not silently reset it.
+          applyProjects(fallbackProjects, defaultClient.baseUrl, false);
           return;
         } catch {
           // Report the original connection failure below.
@@ -331,13 +354,23 @@ function LoomApp() {
         const nextTasks = await client.tasks(nextProjectId);
         if (tasksRequestRef.current !== requestId) return;
         setTasks(nextTasks);
-        setSelectedSlug((current) =>
-          current && nextTasks.some((task) => task.slug === current)
-            ? current
-            : isCompact
-              ? ''
-              : nextTasks[0]?.slug || '',
-        );
+        // Reopening the app should land back on the task you were working in.
+        const [restoreProject, restoreSlug] = (restoreTaskRef.current || '').split(':');
+        const restorable =
+          restoreProject === nextProjectId &&
+          restoreSlug &&
+          nextTasks.some((task) => task.slug === restoreSlug)
+            ? restoreSlug
+            : '';
+        restoreTaskRef.current = '';
+        setSelectedSlug((current) => {
+          if (current && nextTasks.some((task) => task.slug === current)) return current;
+          if (restorable) {
+            selectedRef.current = { projectId: nextProjectId, slug: restorable };
+            return restorable;
+          }
+          return isCompact ? '' : nextTasks[0]?.slug || '';
+        });
       } catch (error) {
         if (tasksRequestRef.current !== requestId) return;
         setTaskListError(error instanceof Error ? error.message : String(error));
@@ -426,6 +459,7 @@ function LoomApp() {
       TERMINAL_FONT_SIZE_KEY,
       SELECTED_PROJECT_KEY,
       SELECTED_TAB_KEY,
+      SELECTED_TASK_KEY,
       GATEWAY_URL_KEY,
     ])
       .then((entries) => {
@@ -437,13 +471,15 @@ function LoomApp() {
         }
         const savedProject = values[SELECTED_PROJECT_KEY]?.trim();
         if (savedProject) setProjectId(savedProject);
+        restoreTaskRef.current = values[SELECTED_TASK_KEY]?.trim() || '';
         const savedTab = values[SELECTED_TAB_KEY];
-        if (savedTab === 'conversation' || savedTab === 'changes' || savedTab === 'notes') {
+        if (
+          savedTab === 'conversation' ||
+          savedTab === 'changes' ||
+          savedTab === 'notes' ||
+          savedTab === 'activity'
+        ) {
           setTab(savedTab);
-        } else if (savedTab === 'activity') {
-          // Existing installs used Activity for the raw terminal. Migrate them
-          // to the new conversation-first home while keeping Terminal available.
-          setTab('conversation');
         }
         gateway.adoptStored(values[GATEWAY_URL_KEY]);
       })
@@ -463,8 +499,12 @@ function LoomApp() {
       [SELECTED_TAB_KEY, tab],
     ];
     if (projectId) entries.push([SELECTED_PROJECT_KEY, projectId]);
+    entries.push([
+      SELECTED_TASK_KEY,
+      projectId && selectedSlug ? `${projectId}:${selectedSlug}` : '',
+    ]);
     void AsyncStorage.multiSet(entries).catch(() => {});
-  }, [projectId, settingsHydrated, tab, terminalFontSize]);
+  }, [projectId, selectedSlug, settingsHydrated, tab, terminalFontSize]);
 
   useEffect(() => {
     void loadProjects();
@@ -550,9 +590,21 @@ function LoomApp() {
 
   useEffect(() => {
     if (!projectId || !selectedSlug || !appActive) return;
-    void loadSelected();
-    const timer = setInterval(() => void loadSelected(), 4000);
-    return () => clearInterval(timer);
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const poll = async () => {
+      await loadSelected();
+      if (cancelled) return;
+      // Task metadata barely moves while a stream is already reporting the
+      // pane; this pair of requests can wait twice as long there.
+      const watchingTerminal = tabRef.current === 'activity' && terminalLiveRef.current;
+      timer = setTimeout(() => void poll(), watchingTerminal ? 8000 : 4000);
+    };
+    void poll();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
   }, [appActive, loadSelected, projectId, selectedSlug]);
 
   useEffect(() => {
@@ -573,7 +625,12 @@ function LoomApp() {
     const poll = async (initial: boolean) => {
       await loadConversation(initial, !initial);
       if (!cancelled) {
-        timer = setTimeout(() => void poll(false), 600);
+        // Sub-second freshness only matters while the chat is on screen. Behind
+        // the terminal this poll just re-renders the tree and steals frames.
+        timer = setTimeout(
+          () => void poll(false),
+          tabRef.current === 'conversation' ? 600 : 2500,
+        );
       }
     };
     void poll(true);
@@ -599,7 +656,13 @@ function LoomApp() {
       } catch {
         // Keep the last known state through a transient network failure.
       }
-      if (!cancelled) timer = setTimeout(() => void poll(), 400);
+      // This poll only feeds the Working pill. While you are watching the live
+      // pane it is the least useful request in flight, so back it right off.
+      if (!cancelled) {
+        const watchingTerminal =
+          tabRef.current === 'activity' && terminalLiveRef.current;
+        timer = setTimeout(() => void poll(), watchingTerminal ? 3000 : 1200);
+      }
     };
     void poll();
     return () => {
@@ -754,6 +817,30 @@ function LoomApp() {
       }
     },
     [client, loadConversation, loadSelected, loadTasks, projectId, selectedSlug],
+  );
+
+  /** Stop kills the session and whatever it was mid-way through, and the
+   *  button sits a thumb-width from Refresh, so make it deliberate. */
+  const requestAgentAction = useCallback(
+    (action: 'start' | 'stop') => {
+      if (action === 'start') {
+        void runAgentAction('start');
+        return;
+      }
+      Alert.alert(
+        'Stop this agent?',
+        'The session ends and any work it is in the middle of is interrupted. Files already written stay on the server.',
+        [
+          { text: 'Keep running', style: 'cancel' },
+          {
+            text: 'Stop agent',
+            style: 'destructive',
+            onPress: () => void runAgentAction('stop'),
+          },
+        ],
+      );
+    },
+    [runAgentAction],
   );
 
   const armOptimisticActivity = useCallback(
@@ -973,13 +1060,18 @@ function LoomApp() {
     ],
   );
 
-  const filteredTasks = tasks.filter((task) => {
+  const filteredTasks = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    if (!needle) return true;
-    return `${task.title} ${task.slug} ${task.general_goal || ''} ${task.agent || ''} ${task.interview_model || ''}`
-      .toLowerCase()
-      .includes(needle);
-  });
+    const matches = tasks.filter((task) => {
+      if (!needle) return true;
+      return `${task.title} ${task.slug} ${task.general_goal || ''} ${task.agent || ''} ${task.interview_model || ''}`
+        .toLowerCase()
+        .includes(needle);
+    });
+    // Whatever you touched last is what you almost always want to reopen.
+    const touched = (task: LoomTask) => Date.parse(task.updated_at || '') || 0;
+    return matches.sort((left, right) => touched(right) - touched(left));
+  }, [query, tasks]);
 
   const sidebar = (
     <View style={[styles.sidebar, isCompact && styles.sidebarCompact]}>
@@ -1232,12 +1324,11 @@ function LoomApp() {
               <Text numberOfLines={1} style={styles.taskHeroTitle}>
                 {selectedTask.title || selectedTask.slug}
               </Text>
-              {!isCompact && (
-                <StatusPill
-                  running={working}
-                  label={working ? 'Working' : running ? 'Ready' : 'Stopped'}
-                />
-              )}
+              {/* Phones had no at-a-glance agent state outside the chat footer. */}
+              <StatusPill
+                running={working}
+                label={working ? 'Working' : running ? 'Ready' : 'Stopped'}
+              />
             </View>
             <Text numberOfLines={1} style={styles.taskHeroGoal}>
               {selectedTask.general_goal || selectedTask.slug}
@@ -1263,7 +1354,7 @@ function LoomApp() {
             label={running ? 'Stop' : 'Start'}
             icon={running ? 'stop-outline' : 'play-outline'}
             tone={running ? 'danger' : 'primary'}
-            onPress={() => void runAgentAction(running ? 'stop' : 'start')}
+            onPress={() => requestAgentAction(running ? 'stop' : 'start')}
             disabled={actionBusy}
           />
         </View>
@@ -1334,9 +1425,6 @@ function LoomApp() {
       >
           {keyboardFocusMode && (
             <View style={styles.keyboardFocusOverlay}>
-              <Text style={styles.keyboardFocusLabel}>
-                {terminal.focused ? 'Terminal input' : 'Message input'}
-              </Text>
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel="Hide software keyboard"
@@ -1376,6 +1464,8 @@ function LoomApp() {
             onTerminalFocusChange={terminal.setFocused}
             onFullscreenChange={terminal.setFullscreen}
             onStreamStateChange={terminal.setStreamState}
+            onComposeSend={sendTerminalCompose}
+            detail={detail}
           />
       </View>
       ) : null}
@@ -1394,10 +1484,38 @@ function LoomApp() {
         </ScrollView>
       ) : null}
 
+      {tab === 'activity' &&
+        terminalKeyboardFocusMode &&
+        !terminal.fullscreen && (
+        <View style={[styles.composerShell, styles.composerShellDock]}>
+          <TerminalKeyboard
+            variant="dock"
+            disabled={!target || terminal.streamState !== 'live'}
+            disabledReason={
+              !target
+                ? 'Start agent to enable'
+                : terminal.streamState === 'paused'
+                  ? 'Terminal paused'
+                  : 'Connecting terminal…'
+            }
+            pending={terminal.keyPending}
+            lastKey={terminal.lastKey}
+            error={terminal.keyError}
+            onKey={sendTerminalKey}
+          />
+        </View>
+      )}
+
       {(tab === 'conversation' || tab === 'activity') &&
         !terminalKeyboardFocusMode &&
         !terminal.fullscreen && (
-        <View style={[styles.composerShell, isCompact && styles.composerShellCompact]}>
+        <View
+          style={[
+            styles.composerShell,
+            isCompact && styles.composerShellCompact,
+            tab === 'activity' && terminal.keysOpen && styles.composerShellTerminal,
+          ]}
+        >
           {tab === 'activity' && terminal.keysOpen ? (
             <TerminalKeyboard
               disabled={!target || terminal.streamState !== 'live'}
@@ -1433,7 +1551,13 @@ function LoomApp() {
               <Icon name="close" size={13} color={colors.red} />
             </Pressable>
           ) : null}
-          <View style={[styles.composer, !running && styles.composerOffline]}>
+          <View
+            style={[
+              styles.composer,
+              !running && styles.composerOffline,
+              tab === 'activity' && terminal.keysOpen && styles.composerWithKeys,
+            ]}
+          >
             {tab === 'activity' ? (
               <Pressable
                 accessibilityRole="button"
@@ -1459,19 +1583,29 @@ function LoomApp() {
             <TextInput
               value={message}
               onChangeText={setMessage}
-              onFocus={() => terminal.setFocused(false)}
+              onFocus={() => {
+                terminal.setFocused(false);
+                terminal.requestBlur();
+              }}
               multiline
               maxLength={12000}
               editable={running && !actionBusy}
               placeholder={
-                running
-                  ? working
-                    ? 'Steer the running agent…'
-                    : 'Send a follow-up…'
-                  : 'Agent session offline'
+                tab === 'activity' && terminal.keysOpen
+                  ? running
+                    ? 'Or steer via chat…'
+                    : 'Agent offline'
+                  : running
+                    ? working
+                      ? 'Steer the running agent…'
+                      : 'Send a follow-up…'
+                    : 'Agent session offline'
               }
               placeholderTextColor={colors.textDim}
-              style={styles.composerInput}
+              style={[
+                styles.composerInput,
+                tab === 'activity' && terminal.keysOpen && styles.composerInputWithKeys,
+              ]}
             />
             <Pressable
               accessibilityRole="button"
