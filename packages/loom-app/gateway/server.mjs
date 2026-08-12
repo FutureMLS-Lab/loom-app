@@ -15,6 +15,7 @@ const allowedOrigin = process.env.LOOM_APP_ORIGIN || '*';
 const xtermEntryUrl = import.meta.resolve('@xterm/xterm');
 const xtermJs = await readFile(new URL(xtermEntryUrl));
 const xtermCss = await readFile(new URL('../css/xterm.css', xtermEntryUrl));
+const xtermFitJs = await readFile(new URL(import.meta.resolve('@xterm/addon-fit')));
 
 const terminalHtml = Buffer.from(`<!doctype html>
 <html>
@@ -27,41 +28,55 @@ const terminalHtml = Buffer.from(`<!doctype html>
       * { box-sizing: border-box; }
       html, body, #terminal {
         width: 100%; height: 100%; margin: 0; overflow: hidden;
-        background: #111014; touch-action: none;
+        background: #211d1a; touch-action: manipulation;
       }
-      body { padding: 10px 8px 8px; }
+      body { padding: 0; }
+      #terminal {
+        transition: box-shadow .15s ease;
+      }
+      #terminal:focus-within {
+        box-shadow: inset 0 0 0 2px rgba(245, 158, 11, 0.5);
+      }
       .xterm { height: 100%; }
+      /* Let WebKit own the scroll so scrollback flicks with real momentum. */
       .xterm-viewport {
         overflow-y: scroll !important;
         overscroll-behavior: contain;
         -webkit-overflow-scrolling: touch;
-        touch-action: none;
+        touch-action: pan-y;
+        background-color: transparent !important;
+      }
+      .xterm-viewport::-webkit-scrollbar { width: 0; height: 0; }
+      .composition-view {
+        background: #fffaf0; color: #4a4036;
+        border: 1px solid #d9a441; border-radius: 4px; padding: 0 3px; z-index: 10;
       }
       #status {
         position: fixed; top: 8px; right: 9px; z-index: 3;
         padding: 4px 7px; border-radius: 9px;
-        color: #aaa5b0; background: rgba(32,31,36,.88);
-        font: 600 10px -apple-system, BlinkMacSystemFont, sans-serif;
+        color: #b45309; background: rgba(245,158,11,.14);
+        border: 1px solid rgba(245,158,11,.34);
+        font: 700 10px -apple-system, BlinkMacSystemFont, sans-serif;
         pointer-events: none; opacity: 0; transition: opacity .18s ease;
       }
       #status.visible { opacity: 1; }
-      #status.error { color: #ffaaa1; background: rgba(72,42,43,.96); }
+      #status.error { color: #e06c5a; background: rgba(224,108,90,.16); border-color: rgba(224,108,90,.4); }
       #terminal-controls {
         position: fixed; right: 10px; bottom: 10px; z-index: 4;
         display: flex; gap: 5px; align-items: center;
         padding: 5px; border-radius: 12px;
-        background: rgba(25,24,29,.88); border: 1px solid rgba(99,93,112,.58);
+        background: rgba(253,249,241,.94); border: 1px solid #ece0cd;
         backdrop-filter: blur(12px);
       }
       #terminal-controls button {
         min-width: 39px; height: 29px; padding: 0 8px;
-        border: 1px solid #4a4751; border-radius: 8px;
-        color: #aaa5b0; background: #28262d;
+        border: 1px solid #e7d6b3; border-radius: 8px;
+        color: #6b5b43; background: #fffdf8;
         font: 700 10px -apple-system, BlinkMacSystemFont, sans-serif;
       }
       #terminal-controls button:active { transform: translateY(1px); opacity: .8; }
       #terminal-controls #latest.active {
-        color: #211a4a; border-color: #a99cff; background: #c8bfff;
+        color: #fff; border-color: #d97706; background: #f59e0b;
       }
     </style>
   </head>
@@ -74,12 +89,14 @@ const terminalHtml = Buffer.from(`<!doctype html>
       <button type="button" id="page-down" aria-label="Next terminal page">Pg↓</button>
     </div>
     <script src="/terminal-assets/xterm.js"></script>
+    <script src="/terminal-assets/addon-fit.js"></script>
     <script>
       (() => {
         const params = new URLSearchParams(location.search);
         const target = params.get('target') || '';
         const cols = Math.max(24, Math.min(220, Number(params.get('cols')) || 60));
-        const bottomReserveRows = 4;
+        const nativeControls = params.get('nativeControls') === '1';
+        const bottomReserveRows = nativeControls ? 0 : 2;
         const rows = Math.max(
           10,
           Math.min(100, (Number(params.get('rows')) || 28) - bottomReserveRows)
@@ -104,43 +121,48 @@ const terminalHtml = Buffer.from(`<!doctype html>
           cols,
           rows,
           cursorBlink: true,
-          cursorStyle: 'bar',
-          cursorWidth: 2,
-          fontFamily: 'Menlo, Monaco, ui-monospace, SFMono-Regular, monospace',
+          cursorInactiveStyle: 'outline',
+          fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace',
           fontSize,
-          fontWeight: '400',
-          fontWeightBold: '700',
-          lineHeight: 1.18,
-          letterSpacing: 0,
-          scrollback: 5000,
-          smoothScrollDuration: 70,
-          allowTransparency: true,
+          lineHeight: 1.15,
+          scrollback: 8000,
+          smoothScrollDuration: 40,
           macOptionIsMeta: true,
           theme: {
-            background: '#111014',
-            foreground: '#ded9e2',
-            cursor: '#c8bfff',
-            cursorAccent: '#211a4a',
-            selectionBackground: 'rgba(169,156,255,.34)',
-            black: '#17161a',
-            red: '#ffaaa1',
-            green: '#82d3a2',
-            yellow: '#e7c27d',
-            blue: '#a99cff',
-            magenta: '#d7a8ff',
-            cyan: '#83d6d1',
-            white: '#f2eef4',
-            brightBlack: '#77727e',
-            brightRed: '#ffc0ba',
-            brightGreen: '#a8e8bd',
-            brightYellow: '#f1d9a3',
-            brightBlue: '#c8bfff',
-            brightMagenta: '#e6c8ff',
-            brightCyan: '#afe9e5',
-            brightWhite: '#ffffff'
+            // Match Loom web_static warm-dark terminal.
+            background: '#211d1a',
+            foreground: '#e7ddcf',
+            cursor: '#f59e0b',
+            cursorAccent: '#211d1a',
+            selectionBackground: 'rgba(245,158,11,0.30)',
+            black: '#2b2620',
+            red: '#e06c5a',
+            green: '#9ec46a',
+            yellow: '#e0af68',
+            blue: '#7aa2f7',
+            magenta: '#c79bf0',
+            cyan: '#79c7c7',
+            white: '#d8cfc2',
+            brightBlack: '#7a6f60',
+            brightRed: '#f08a7a',
+            brightGreen: '#b6d98a',
+            brightYellow: '#f0c987',
+            brightBlue: '#9bb8fa',
+            brightMagenta: '#d4b3f5',
+            brightCyan: '#9bd9d9',
+            brightWhite: '#fdf6ea'
           }
         });
         term.open(document.getElementById('terminal'));
+        // Measure the real cell size instead of guessing it, so the PTY grid
+        // always matches the pane and long lines never wrap mid-render.
+        let fit = null;
+        try {
+          fit = new FitAddon.FitAddon();
+          term.loadAddon(fit);
+        } catch (error) {
+          console.debug('fit addon unavailable', error);
+        }
         const terminalInput = document.querySelector('.xterm-helper-textarea');
         const postTerminalFocus = (focused) => {
           window.ReactNativeWebView?.postMessage(
@@ -203,45 +225,42 @@ const terminalHtml = Buffer.from(`<!doctype html>
           updateScrollState();
         });
 
+        // Scrolling is left to WebKit's own viewport so it matches the browser
+        // (momentum, rubber-band, handoff to the page). Touch handling here only
+        // decides whether the gesture was a tap, which focuses the PTY.
         const terminalElement = document.getElementById('terminal');
-        const touch = { lastY: 0, remainder: 0, moved: false };
+        const viewport = () => terminalElement.querySelector('.xterm-viewport');
+        const touch = { startX: 0, startY: 0, moved: false };
         terminalElement.addEventListener('touchstart', (event) => {
           if (event.touches.length !== 1) return;
-          event.preventDefault();
-          event.stopPropagation();
-          touch.lastY = event.touches[0].clientY;
-          touch.remainder = 0;
+          touch.startX = event.touches[0].clientX;
+          touch.startY = event.touches[0].clientY;
           touch.moved = false;
-        }, { passive: false, capture: true });
+        }, { passive: true });
         terminalElement.addEventListener('touchmove', (event) => {
           if (event.touches.length !== 1) return;
-          event.preventDefault();
-          event.stopPropagation();
-          const nextY = event.touches[0].clientY;
-          const delta = nextY - touch.lastY;
-          touch.lastY = nextY;
-          touch.remainder += delta;
-          if (Math.abs(touch.remainder) >= 5) touch.moved = true;
-          const pixelsPerLine = Math.max(5, fontSize * 0.55);
-          const lines = Math.trunc(touch.remainder / pixelsPerLine);
-          if (lines) {
-            if (lines > 0) userBrowsingHistory = true;
-            term.scrollLines(-lines);
-            touch.remainder -= lines * pixelsPerLine;
-            updateScrollState();
-          }
-        }, { passive: false, capture: true });
-        terminalElement.addEventListener('touchend', (event) => {
-          event.preventDefault();
-          event.stopPropagation();
+          const dx = Math.abs(event.touches[0].clientX - touch.startX);
+          const dy = Math.abs(event.touches[0].clientY - touch.startY);
+          if (dx > 8 || dy > 8) touch.moved = true;
+        }, { passive: true });
+        terminalElement.addEventListener('touchend', () => {
           if (!touch.moved) term.focus();
-          touch.remainder = 0;
-        }, { passive: false, capture: true });
-        terminalElement.addEventListener('touchcancel', (event) => {
-          event.stopPropagation();
-          touch.remainder = 0;
           touch.moved = false;
-        }, { passive: true, capture: true });
+        }, { passive: true });
+
+        const reportViewportScroll = () => {
+          const buffer = term.buffer.active;
+          userBrowsingHistory = buffer.viewportY < buffer.baseY;
+          updateScrollState();
+        };
+        const attachViewportListener = () => {
+          const element = viewport();
+          if (!element || element.dataset.loomScrollBound === '1') return;
+          element.dataset.loomScrollBound = '1';
+          element.addEventListener('scroll', reportViewportScroll, { passive: true });
+        };
+        attachViewportListener();
+        setTimeout(attachViewportListener, 400);
 
         let streamId = '';
         let inputQueue = Promise.resolve();
@@ -311,22 +330,36 @@ const terminalHtml = Buffer.from(`<!doctype html>
           connect(currentCols, currentRows);
         };
 
-        window.loomTerminalResize = (nextCols, nextRows) => {
-          const normalizedCols = Math.max(24, Math.min(220, Math.round(Number(nextCols) || currentCols)));
-          const normalizedRows = Math.max(
-            10,
-            Math.min(
-              100,
-              Math.round(Number(nextRows) || currentRows + bottomReserveRows) - bottomReserveRows
-            )
+        const postGrid = () => {
+          window.ReactNativeWebView?.postMessage(
+            JSON.stringify({ type: 'terminal-grid', cols: currentCols, rows: currentRows })
           );
-          if (normalizedCols === currentCols && normalizedRows === currentRows) return;
-          currentCols = normalizedCols;
-          currentRows = normalizedRows;
+        };
+        const applyFit = (reconnect) => {
+          let proposed = null;
+          try {
+            proposed = fit ? fit.proposeDimensions() : null;
+          } catch (error) {
+            proposed = null;
+          }
+          if (!proposed || !proposed.cols || !proposed.rows) return false;
+          const nextCols = Math.max(24, Math.min(220, proposed.cols));
+          const nextRows = Math.max(10, Math.min(100, proposed.rows - bottomReserveRows));
+          if (nextCols === currentCols && nextRows === currentRows) {
+            postGrid();
+            return false;
+          }
+          currentCols = nextCols;
+          currentRows = nextRows;
           term.resize(currentCols, currentRows);
+          postGrid();
+          if (!reconnect) return true;
           if (resizeTimer) clearTimeout(resizeTimer);
           resizeTimer = setTimeout(() => connect(currentCols, currentRows), 300);
+          return true;
         };
+        window.loomTerminalResize = () => applyFit(true);
+        addEventListener('resize', () => applyFit(true));
 
         async function connect(nextCols = currentCols, nextRows = currentRows) {
           if (paused || pageClosing) return;
@@ -381,6 +414,7 @@ const terminalHtml = Buffer.from(`<!doctype html>
           }
         }
 
+        applyFit(false);
         connect();
       })();
     </script>
@@ -579,7 +613,8 @@ const terminalSnapshotHtml = Buffer.from(`<!doctype html>
 
         const keyMap = {
           Enter: 'Enter',
-          Backspace: 'Backspace',
+          // tmux key name is BSpace; "Backspace" is typed as literal text
+          Backspace: 'BSpace',
           Tab: 'Tab',
           Escape: 'Escape',
           ArrowUp: 'Up',
@@ -803,6 +838,22 @@ function responseHeaders(upstream) {
   return headers;
 }
 
+const TMUX_KEY_ALIASES = {
+  Backspace: 'BSpace',
+};
+
+function rewriteTmuxSendKeyBody(pathname, rawBody) {
+  if (pathname !== '/api/tmux/send-key' || !rawBody) return rawBody;
+  try {
+    const payload = JSON.parse(rawBody.toString('utf8'));
+    const alias = TMUX_KEY_ALIASES[payload?.key];
+    if (!alias) return rawBody;
+    return Buffer.from(JSON.stringify({ ...payload, key: alias }), 'utf8');
+  } catch {
+    return rawBody;
+  }
+}
+
 async function proxy(request, response) {
   const incomingUrl = new URL(request.url || '/', `http://${request.headers.host}`);
   if (!incomingUrl.pathname.startsWith('/api/')) {
@@ -816,7 +867,7 @@ async function proxy(request, response) {
   const body =
     request.method === 'GET' || request.method === 'HEAD'
       ? undefined
-      : await readBody(request);
+      : rewriteTmuxSendKeyBody(incomingUrl.pathname, await readBody(request));
   const upstream = await fetch(`${loomBaseUrl}${incomingUrl.pathname}${incomingUrl.search}`, {
     method: request.method,
     headers: upstreamHeaders(request),
@@ -853,6 +904,10 @@ const server = http.createServer(async (request, response) => {
     sendBuffer(response, 200, 'text/javascript; charset=utf-8', xtermJs, 'public, max-age=31536000, immutable');
     return;
   }
+  if (request.method === 'GET' && incomingUrl.pathname === '/terminal-assets/addon-fit.js') {
+    sendBuffer(response, 200, 'text/javascript; charset=utf-8', xtermFitJs, 'public, max-age=31536000, immutable');
+    return;
+  }
   if (request.method === 'GET' && incomingUrl.pathname === '/terminal-assets/xterm.css') {
     sendBuffer(response, 200, 'text/css; charset=utf-8', xtermCss, 'public, max-age=31536000, immutable');
     return;
@@ -868,7 +923,11 @@ const server = http.createServer(async (request, response) => {
       response,
       200,
       'text/html; charset=utf-8',
-      terminalSnapshotHtml,
+      // xterm + live PTY stream, matching the Loom web console. The snapshot
+      // template stays as a fallback for clients that cannot stream.
+      incomingUrl.searchParams.get('snapshot') === '1'
+        ? terminalSnapshotHtml
+        : terminalHtml,
       'no-store',
       {
         'Content-Security-Policy':

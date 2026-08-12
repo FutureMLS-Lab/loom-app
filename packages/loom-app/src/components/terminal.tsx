@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ActivityIndicator,
   Dimensions,
   Modal,
-  PanResponder,
   Platform,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
+  Vibration,
   useWindowDimensions,
   View,
 } from 'react-native';
@@ -16,10 +16,22 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { WebView, type WebViewMessageEvent } from 'react-native-webview';
 
 import { styles } from '../styles';
-import { colors } from '../theme';
-import type { TerminalCapture, TerminalKey } from '../types';
+import { colors, terminalWeb } from '../theme';
+import type { TaskDetail, TerminalCapture, TerminalKey } from '../types';
 import { MAX_CAPTURE_LINES, type TerminalStreamState } from '../useTerminalSession';
 import { EmptyState, Icon, SectionCard, StatusPill } from './primitives';
+import { PlanPeek } from './views';
+
+const WEB_COMPACT_KEYS: { value: TerminalKey; label: string; tone?: 'neutral' | 'primary' | 'danger' }[] = [
+  { value: 'Escape', label: 'Esc' },
+  { value: 'C-c', label: '⌃C', tone: 'danger' },
+  { value: 'Up', label: '↑' },
+  { value: 'Down', label: '↓' },
+  { value: 'Left', label: '←' },
+  { value: 'Right', label: '→' },
+  { value: 'Tab', label: 'Tab' },
+  { value: 'Enter', label: '⏎', tone: 'primary' },
+];
 
 export function TerminalKeyButton({
   value,
@@ -56,14 +68,26 @@ export function TerminalKeyButton({
       accessibilityLabel={`Send ${label} to the agent terminal`}
       accessibilityState={{ disabled }}
       disabled={disabled}
-      onPress={() => onPress(value)}
+      onPress={() => {
+        try {
+          if (Platform.OS === 'android') Vibration.vibrate(8);
+        } catch {
+          // Ignore haptic failures — never block the key.
+        }
+        onPress(value);
+      }}
       delayLongPress={360}
       onLongPress={
         repeat
           ? () => {
+              try {
+                if (Platform.OS === 'android') Vibration.vibrate(8);
+              } catch {
+                // Ignore haptic failures — never block the key.
+              }
               onPress(value);
               stopRepeating();
-              repeatTimerRef.current = setInterval(() => onPress(value), 180);
+              repeatTimerRef.current = setInterval(() => onPress(value), 140);
             }
           : undefined
       }
@@ -74,25 +98,19 @@ export function TerminalKeyButton({
         tone === 'primary' && styles.terminalKeyPrimary,
         tone === 'danger' && styles.terminalKeyDanger,
         disabled && styles.terminalKeyDisabled,
-        pressed && styles.terminalKeyPressed,
+        (pressed || active) && styles.terminalKeyPressed,
+        active && styles.terminalKeyActive,
       ]}
     >
-      {active ? (
-        <ActivityIndicator
-          size="small"
-          color={tone === 'primary' ? '#211a4a' : colors.primary}
-        />
-      ) : (
-        <Text
-          style={[
-            styles.terminalKeyText,
-            tone === 'primary' && styles.terminalKeyTextPrimary,
-            tone === 'danger' && styles.terminalKeyTextDanger,
-          ]}
-        >
-          {label}
-        </Text>
-      )}
+      <Text
+        style={[
+          styles.terminalKeyText,
+          tone === 'primary' && styles.terminalKeyTextPrimary,
+          tone === 'danger' && styles.terminalKeyTextDanger,
+        ]}
+      >
+        {label}
+      </Text>
     </Pressable>
   );
 }
@@ -132,7 +150,7 @@ export function ExpandedTerminalKeyboard({
           style={StyleSheet.absoluteFill}
         />
         <View style={styles.expandedKeyboardSheet}>
-          <View style={styles.projectModalHandle} />
+          <View style={styles.expandedKeyboardHandle} />
           <View style={styles.expandedKeyboardHeader}>
             <View>
               <Text style={styles.expandedKeyboardTitle}>Expanded terminal keyboard</Text>
@@ -144,9 +162,9 @@ export function ExpandedTerminalKeyboard({
               accessibilityRole="button"
               accessibilityLabel="Close expanded keyboard"
               onPress={onClose}
-              style={styles.iconButton}
+              style={styles.expandedKeyboardClose}
             >
-              <Icon name="close" color={colors.text} />
+              <Icon name="close" color={terminalWeb.title} />
             </Pressable>
           </View>
           <ScrollView
@@ -187,7 +205,7 @@ export function ExpandedTerminalKeyboard({
               <TerminalKeyButton {...common('PageDown')} label="Pg↓" />
             </View>
             <View style={styles.expandedKeyRow}>
-              <TerminalKeyButton {...common('Backspace')} label="⌫" repeat />
+              <TerminalKeyButton {...common('BSpace')} label="⌫" repeat />
               <TerminalKeyButton {...common('DC')} label="Del" />
               <TerminalKeyButton {...common('IC')} label="Ins" />
               <TerminalKeyButton {...common('Space')} label="Space" wide />
@@ -246,6 +264,7 @@ export function TerminalKeyboard({
   lastKey,
   error,
   onKey,
+  variant = 'full',
 }: {
   disabled: boolean;
   disabledReason?: string;
@@ -253,75 +272,55 @@ export function TerminalKeyboard({
   lastKey: TerminalKey | null;
   error: string;
   onKey: (key: TerminalKey) => void;
+  /** `dock` stays above the OS keyboard while typing in the PTY. */
+  variant?: 'full' | 'dock';
 }) {
   const [expanded, setExpanded] = useState(false);
+  const docked = variant === 'dock';
   const keyActive = (key: TerminalKey) => pending > 0 && lastKey === key;
+  const common = (key: TerminalKey) => ({
+    value: key,
+    disabled,
+    active: keyActive(key),
+    onPress: onKey,
+  });
 
   return (
     <>
-      <View style={styles.terminalKeyboard}>
-        <View style={styles.terminalKeyboardHeader}>
-          <View style={styles.terminalKeyboardTitleRow}>
-            <Icon name="keypad-outline" size={15} color={colors.primary} />
-            <Text style={styles.terminalKeyboardTitle}>Terminal keys</Text>
-          </View>
-          <View style={styles.terminalKeyboardHeaderRight}>
-            <Text style={styles.terminalKeyboardStatus}>
-          {disabled ? disabledReason : pending ? `${pending} queued` : 'Direct tmux input'}
-            </Text>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Open expanded terminal keyboard"
-              onPress={() => setExpanded(true)}
-              style={({ pressed }) => [styles.keyboardExpandButton, pressed && styles.pressed]}
-            >
-              <Icon name="expand-outline" size={13} color={colors.primary} />
-              <Text style={styles.keyboardExpandButtonText}>More</Text>
-            </Pressable>
-          </View>
-        </View>
+      <View style={[styles.terminalKeyboard, docked && styles.terminalKeyboardDock]}>
         <View style={styles.terminalKeyRow}>
-          <TerminalKeyButton
-            value="Escape"
-            label="Esc"
-            disabled={disabled}
-            active={keyActive('Escape')}
-            onPress={onKey}
-          />
-          <TerminalKeyButton
-            value="C-c"
-            label="⌃C"
-            tone="danger"
-            disabled={disabled}
-            active={keyActive('C-c')}
-            onPress={onKey}
-          />
-          <TerminalKeyButton value="Up" label="↑" repeat disabled={disabled} active={keyActive('Up')} onPress={onKey} />
-          <TerminalKeyButton value="Down" label="↓" repeat disabled={disabled} active={keyActive('Down')} onPress={onKey} />
-          <TerminalKeyButton value="Left" label="←" repeat disabled={disabled} active={keyActive('Left')} onPress={onKey} />
-          <TerminalKeyButton value="Right" label="→" repeat disabled={disabled} active={keyActive('Right')} onPress={onKey} />
-          <TerminalKeyButton value="Tab" label="Tab" disabled={disabled} active={keyActive('Tab')} onPress={onKey} />
-          <TerminalKeyButton
-            value="Enter"
-            label="Enter"
-            tone="primary"
-            wide
-            disabled={disabled}
-            active={keyActive('Enter')}
-            onPress={onKey}
-          />
+          {WEB_COMPACT_KEYS.map((key) => (
+            <TerminalKeyButton
+              key={key.value}
+              {...common(key.value)}
+              label={key.label}
+              tone={key.tone}
+              repeat={
+                key.value === 'Up' ||
+                key.value === 'Down' ||
+                key.value === 'Left' ||
+                key.value === 'Right'
+              }
+            />
+          ))}
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Open expanded terminal keyboard"
+            onPress={() => setExpanded(true)}
+            style={({ pressed }) => [
+              styles.terminalKey,
+              styles.terminalKeyMore,
+              pressed && styles.terminalKeyPressed,
+            ]}
+          >
+            <Icon name="ellipsis-horizontal" size={16} color={terminalWeb.keyText} />
+          </Pressable>
         </View>
-        {error ? (
-          <View style={styles.terminalKeyboardError}>
-            <Icon name="warning-outline" size={14} color={colors.red} />
-            <Text style={styles.terminalKeyboardErrorText}>{error}</Text>
-          </View>
-        ) : null}
-        <Text style={styles.terminalKeyboardHint}>
-          {disabled
-            ? disabledReason
-            : 'Keys act immediately. Double-tap Enter to force a queued Cursor follow-up.'}
-        </Text>
+        {(error || pending > 0 || disabled) && (
+          <Text style={styles.terminalKeyboardStatus} numberOfLines={1}>
+            {disabled ? disabledReason : error ? error : `${pending} queued`}
+          </Text>
+        )}
       </View>
       <ExpandedTerminalKeyboard
         visible={expanded}
@@ -346,6 +345,7 @@ export function LiveTerminalView({
   blurRequest = 0,
   onStateChange,
   onFocusChange,
+  onGridChange,
 }: {
   gatewayUrl: string;
   gatewayAuthToken: string;
@@ -356,6 +356,7 @@ export function LiveTerminalView({
   blurRequest?: number;
   onStateChange: (state: TerminalStreamState) => void;
   onFocusChange?: (focused: boolean) => void;
+  onGridChange?: (grid: { cols: number; rows: number }) => void;
 }) {
   const { width: windowWidth } = useWindowDimensions();
   const screenHeight = Dimensions.get('screen').height;
@@ -363,18 +364,23 @@ export function LiveTerminalView({
   const [streamError, setStreamError] = useState('');
   const [atBottom, setAtBottom] = useState(true);
   const [linesBehind, setLinesBehind] = useState(0);
+  const [focused, setFocused] = useState(false);
+  const [layoutSize, setLayoutSize] = useState({
+    width: Math.max(280, windowWidth - (fullscreen ? 16 : 40)),
+    height: fullscreen
+      ? Math.max(420, screenHeight - 120)
+      : Math.max(300, Math.min(620, Math.round(screenHeight * 0.5))),
+  });
   const webViewRef = useRef<WebView>(null);
-  const stableWidth = Math.max(280, windowWidth - (fullscreen ? 16 : 40));
-  const stableHeight = fullscreen
-    ? Math.max(420, screenHeight - 190)
-    : Math.max(300, Math.min(620, Math.round(screenHeight * 0.5)));
+  const stableWidth = layoutSize.width;
+  const stableHeight = layoutSize.height;
   const columns = Math.max(
     32,
-    Math.min(140, Math.floor((stableWidth - 18) / (fontSize * 0.62))),
+    Math.min(140, Math.floor((stableWidth - 6) / (fontSize * 0.62))),
   );
   const rows = Math.max(
     14,
-    Math.min(80, Math.floor((stableHeight - 18) / (fontSize * 1.18))),
+    Math.min(80, Math.floor((stableHeight - 6) / (fontSize * 1.18))),
   );
   const initialGeometryRef = useRef({ columns, rows });
   const latestLayoutRef = useRef({ width: stableWidth, height: stableHeight });
@@ -410,8 +416,16 @@ export function LiveTerminalView({
           atBottom?: boolean;
           linesBehind?: number;
           focused?: boolean;
+          cols?: number;
+          rows?: number;
         };
-        if (message.type === 'terminal-status' && message.state) {
+        if (
+          message.type === 'terminal-grid' &&
+          typeof message.cols === 'number' &&
+          typeof message.rows === 'number'
+        ) {
+          onGridChange?.({ cols: message.cols, rows: message.rows });
+        } else if (message.type === 'terminal-status' && message.state) {
           setState(message.state, message.detail || '');
         } else if (
           message.type === 'terminal-scroll' &&
@@ -425,17 +439,19 @@ export function LiveTerminalView({
           message.type === 'terminal-focus' &&
           typeof message.focused === 'boolean'
         ) {
+          setFocused(message.focused);
           onFocusChange?.(message.focused);
         }
       } catch {
         // Ignore non-terminal WebView messages.
       }
     },
-    [onFocusChange, setState],
+    [onFocusChange, onGridChange, setState],
   );
 
   useEffect(
     () => () => {
+      setFocused(false);
       onFocusChange?.(false);
     },
     [onFocusChange],
@@ -444,7 +460,24 @@ export function LiveTerminalView({
   useEffect(() => {
     setAtBottom(true);
     setLinesBehind(0);
+    setFocused(false);
   }, [target]);
+
+  // The hint is for discovery only; leaving it up permanently just covers output.
+  const [hintVisible, setHintVisible] = useState(true);
+  useEffect(() => {
+    setHintVisible(true);
+    const timer = setTimeout(() => setHintVisible(false), 5000);
+    return () => clearTimeout(timer);
+  }, [target]);
+  useEffect(() => {
+    if (focused) setHintVisible(false);
+  }, [focused]);
+
+  const focusTerminal = useCallback(() => {
+    webViewRef.current?.injectJavaScript('window.loomTerminalFocus?.(); true;');
+  }, []);
+
 
   const sendScrollCommand = useCallback((command: 'page-up' | 'latest' | 'page-down') => {
     webViewRef.current?.injectJavaScript(
@@ -452,78 +485,12 @@ export function LiveTerminalView({
     );
   }, []);
 
-  const sendScrollLines = useCallback((lines: number) => {
-    webViewRef.current?.injectJavaScript(
-      `window.loomTerminalScrollLines?.(${Math.round(lines)}); true;`,
-    );
+  // The page measures its own cell size, so a layout change only needs a nudge.
+  const resizeTerminal = useCallback((width: number, height: number) => {
+    latestLayoutRef.current = { width, height };
+    if (!webReadyRef.current || width < 120 || height < 120) return;
+    webViewRef.current?.injectJavaScript('window.loomTerminalResize?.(); true;');
   }, []);
-
-  const focusTerminal = useCallback(() => {
-    webViewRef.current?.injectJavaScript(
-      'window.loomTerminalFocus?.(); true;',
-    );
-  }, []);
-
-  const panLastDyRef = useRef(0);
-  const panRemainderRef = useRef(0);
-  const terminalPanResponder = useMemo(
-    () =>
-      PanResponder.create({
-        onStartShouldSetPanResponder: () => true,
-        onPanResponderGrant: () => {
-          panLastDyRef.current = 0;
-          panRemainderRef.current = 0;
-        },
-        onPanResponderMove: (_event, gesture) => {
-          const delta = gesture.dy - panLastDyRef.current;
-          panLastDyRef.current = gesture.dy;
-          panRemainderRef.current += delta;
-          const pixelsPerLine = Math.max(5, fontSize * 0.55);
-          const lines = Math.trunc(panRemainderRef.current / pixelsPerLine);
-          if (!lines) return;
-          sendScrollLines(-lines);
-          panRemainderRef.current -= lines * pixelsPerLine;
-        },
-        onPanResponderRelease: (_event, gesture) => {
-          if (Math.abs(gesture.dx) < 6 && Math.abs(gesture.dy) < 6) {
-            focusTerminal();
-          } else if (Math.abs(gesture.vy) > 0.3) {
-            const momentumLines = Math.max(
-              -24,
-              Math.min(24, Math.round(-gesture.vy * 18)),
-            );
-            if (momentumLines) sendScrollLines(momentumLines);
-          }
-          panLastDyRef.current = 0;
-          panRemainderRef.current = 0;
-        },
-        onPanResponderTerminate: () => {
-          panLastDyRef.current = 0;
-          panRemainderRef.current = 0;
-        },
-        onPanResponderTerminationRequest: () => true,
-      }),
-    [focusTerminal, fontSize, sendScrollLines],
-  );
-
-  const resizeTerminal = useCallback(
-    (width: number, height: number) => {
-      latestLayoutRef.current = { width, height };
-      if (!webReadyRef.current || width < 120 || height < 120) return;
-      const nextColumns = Math.max(
-        24,
-        Math.min(220, Math.floor((width - 18) / (fontSize * 0.62))),
-      );
-      const nextRows = Math.max(
-        10,
-        Math.min(100, Math.floor((height - 18) / (fontSize * 1.18))),
-      );
-      webViewRef.current?.injectJavaScript(
-        `window.loomTerminalResize?.(${nextColumns}, ${nextRows}); true;`,
-      );
-    },
-    [fontSize],
-  );
 
   useEffect(() => {
     if (!webReadyRef.current) return;
@@ -544,9 +511,17 @@ export function LiveTerminalView({
       style={[
         styles.liveTerminalShell,
         fullscreen ? styles.liveTerminalFullscreen : styles.liveTerminalFill,
+        focused && styles.liveTerminalShellFocused,
       ]}
       onLayout={(event) => {
         const { width, height } = event.nativeEvent.layout;
+        if (width > 0 && height > 0) {
+          setLayoutSize((current) =>
+            current.width === width && current.height === height
+              ? current
+              : { width, height },
+          );
+        }
         resizeTerminal(width, height);
       }}
     >
@@ -563,7 +538,7 @@ export function LiveTerminalView({
         overScrollMode="never"
         scrollEnabled={false}
         nestedScrollEnabled
-        keyboardDisplayRequiresUserAction
+        keyboardDisplayRequiresUserAction={false}
         setSupportMultipleWindows={false}
         style={styles.liveTerminalWebView}
         onLoadStart={() => {
@@ -586,12 +561,29 @@ export function LiveTerminalView({
           setState('error', `Terminal page failed (${event.nativeEvent.statusCode})`)
         }
       />
-      <View
-        style={styles.liveTerminalGestureLayer}
-        {...terminalPanResponder.panHandlers}
-      />
+      {hintVisible && !focused && atBottom && !streamError ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Tap to type in the terminal"
+          onPress={focusTerminal}
+          style={({ pressed }) => [
+            styles.liveTerminalFocusHint,
+            pressed && styles.pressed,
+          ]}
+        >
+          <Text style={styles.liveTerminalFocusHintText}>Tap to type</Text>
+        </Pressable>
+      ) : null}
       {!atBottom ? (
         <View style={styles.liveTerminalControls}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Page up in terminal"
+            onPress={() => sendScrollCommand('page-up')}
+            style={({ pressed }) => [styles.liveTerminalControl, pressed && styles.pressed]}
+          >
+            <Text style={styles.liveTerminalControlText}>Pg↑</Text>
+          </Pressable>
           <Pressable
             accessibilityRole="button"
             accessibilityLabel={`Jump to latest terminal output, ${linesBehind} lines behind`}
@@ -610,6 +602,14 @@ export function LiveTerminalView({
             >
               Latest · {linesBehind}
             </Text>
+          </Pressable>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Page down in terminal"
+            onPress={() => sendScrollCommand('page-down')}
+            style={({ pressed }) => [styles.liveTerminalControl, pressed && styles.pressed]}
+          >
+            <Text style={styles.liveTerminalControlText}>Pg↓</Text>
           </Pressable>
         </View>
       ) : null}
@@ -658,6 +658,8 @@ export function ActivityView({
   onTerminalFocusChange,
   onFullscreenChange,
   onStreamStateChange,
+  onComposeSend,
+  detail,
 }: {
   capture: TerminalCapture | null;
   running: boolean;
@@ -674,16 +676,45 @@ export function ActivityView({
   fullscreen: boolean;
   appActive: boolean;
   terminalBlurRequest: number;
+  detail: TaskDetail | null;
   onFontSizeChange: (fontSize: number) => void;
   onLoadMore: () => void;
   onTerminalKey: (key: TerminalKey) => void;
   onTerminalFocusChange: (focused: boolean) => void;
   onFullscreenChange: (fullscreen: boolean) => void;
   onStreamStateChange: (state: TerminalStreamState) => void;
+  onComposeSend: (text: string) => Promise<void> | void;
 }) {
+  const { height: windowHeight } = useWindowDimensions();
   const [streamState, setStreamState] = useState<TerminalStreamState>('connecting');
-  const [fullscreenKeysOpen, setFullscreenKeysOpen] = useState(false);
+  const [fullscreenKeysOpen, setFullscreenKeysOpen] = useState(true);
+  const [composeOpen, setComposeOpen] = useState(false);
+  const [composeText, setComposeText] = useState('');
+  const [composeBusy, setComposeBusy] = useState(false);
+  // A finger inside the pane belongs to the terminal's own scrollback, not the
+  // page underneath it.
+  const [terminalTouch, setTerminalTouch] = useState(false);
+  const [planOpen, setPlanOpen] = useState(true);
+  const [grid, setGrid] = useState<{ cols: number; rows: number } | null>(null);
   const liveTerminal = Platform.OS !== 'web';
+  // Collapsing the plan is the cheap way to hand the terminal the whole page.
+  const paneRatio = composeOpen ? 0.42 : planOpen ? 0.5 : 0.66;
+  const terminalPaneHeight = Math.max(
+    260,
+    Math.min(640, Math.round(windowHeight * paneRatio)),
+  );
+
+  const submitCompose = useCallback(async () => {
+    const text = composeText.trim();
+    if (!text || composeBusy) return;
+    setComposeBusy(true);
+    try {
+      await onComposeSend(text);
+      setComposeText('');
+    } finally {
+      setComposeBusy(false);
+    }
+  }, [composeBusy, composeText, onComposeSend]);
 
   const reportStreamState = useCallback(
     (state: TerminalStreamState) => {
@@ -695,7 +726,7 @@ export function ActivityView({
 
   useEffect(() => {
     reportStreamState('connecting');
-    setFullscreenKeysOpen(false);
+    setFullscreenKeysOpen(true);
   }, [reportStreamState, target]);
 
   if (!target) {
@@ -710,110 +741,22 @@ export function ActivityView({
     );
   }
 
-  return (
-    <>
-    {fullscreen && !keyboardVisible ? (
-      <View style={styles.fullscreenTerminalHeader}>
-        <View style={styles.fullscreenTerminalHeaderCopy}>
-          <Text style={styles.fullscreenTerminalTitle}>Live terminal</Text>
-          <Text numberOfLines={1} style={styles.fullscreenTerminalTarget}>
-            {target}
-          </Text>
-        </View>
-        <View style={styles.fullscreenTerminalHeaderActions}>
-          <View style={styles.fontSizeControl}>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Decrease terminal font size"
-              disabled={fontSize <= 9}
-              onPress={() => onFontSizeChange(Math.max(9, fontSize - 1))}
-              style={[styles.fontSizeButton, fontSize <= 9 && styles.disabled]}
-            >
-              <Text style={styles.fontSizeButtonText}>A−</Text>
-            </Pressable>
-            <Text style={styles.fontSizeValue}>{fontSize}</Text>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Increase terminal font size"
-              disabled={fontSize >= 18}
-              onPress={() => onFontSizeChange(Math.min(18, fontSize + 1))}
-              style={[styles.fontSizeButton, fontSize >= 18 && styles.disabled]}
-            >
-              <Text style={styles.fontSizeButtonText}>A+</Text>
-            </Pressable>
-          </View>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Close full screen terminal"
-            onPress={() => onFullscreenChange(false)}
-            style={styles.iconButton}
-          >
-            <Icon name="close" color={colors.text} />
-          </Pressable>
-        </View>
-      </View>
-    ) : null}
-    <SectionCard
-      fill
-      hideHeader={keyboardVisible || fullscreen}
-      title="Agent activity"
-      icon="pulse-outline"
-      action={
-        <View style={styles.sectionActions}>
-          {liveTerminal ? (
-            <View
-              style={[
-                styles.liveStatus,
-                streamState === 'error' && styles.liveStatusError,
-              ]}
-            >
-              <View
-                style={[
-                  styles.liveStatusDot,
-                  streamState === 'live' && styles.liveStatusDotOnline,
-                  streamState === 'error' && styles.liveStatusDotError,
-                ]}
-              />
-              <Text
-                style={[
-                  styles.liveStatusText,
-                  streamState === 'live' && styles.liveStatusTextOnline,
-                  streamState === 'error' && styles.liveStatusTextError,
-                ]}
-              >
-                {streamState === 'live'
-                  ? 'Live'
-                  : streamState === 'paused'
-                    ? 'Paused'
-                  : streamState === 'error'
-                    ? 'Offline'
-                    : 'Connecting'}
-              </Text>
-            </View>
-          ) : (
+  if (!liveTerminal) {
+    return (
+      <SectionCard
+        fill
+        title="Agent activity"
+        icon="pulse-outline"
+        action={
+          <View style={styles.sectionActions}>
             <Text style={styles.captureLineCount}>{captureLines} lines</Text>
-          )}
-          <StatusPill
-            running={working}
-            label={working ? 'Working' : running ? 'Ready' : 'Stopped'}
-          />
-          {liveTerminal && (
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Open full screen terminal"
-              onPress={() => onFullscreenChange(true)}
-              style={({ pressed }) => [
-                styles.sectionIconButton,
-                pressed && styles.pressed,
-              ]}
-            >
-              <Icon name="expand-outline" size={15} color={colors.primary} />
-            </Pressable>
-          )}
-        </View>
-      }
-    >
-      {!keyboardVisible && !liveTerminal && (
+            <StatusPill
+              running={working}
+              label={working ? 'Working' : running ? 'Ready' : 'Stopped'}
+            />
+          </View>
+        }
+      >
         <View style={styles.terminalHeader}>
           <View style={styles.terminalLights}>
             <View style={[styles.terminalLight, { backgroundColor: '#ff756c' }]} />
@@ -824,123 +767,288 @@ export function ActivityView({
             {target}
           </Text>
         </View>
-      )}
-      {liveTerminal ? (
-        <LiveTerminalView
-          fullscreen={fullscreen}
-          active={appActive}
-          blurRequest={terminalBlurRequest}
-          gatewayUrl={gatewayUrl}
-          gatewayAuthToken={gatewayAuthToken}
-          target={target}
-          fontSize={fontSize}
-          onStateChange={reportStreamState}
-          onFocusChange={onTerminalFocusChange}
-        />
-      ) : (
         <View style={[styles.terminal, styles.terminalContent]}>
           <Text selectable style={[styles.terminalText, { fontSize, lineHeight: fontSize * 1.5 }]}>
             {capture?.text?.trim() ||
               (running ? 'Waiting for agent output…' : 'No terminal output captured.')}
           </Text>
         </View>
-      )}
-      {!keyboardVisible && !fullscreen && (
-      <View style={styles.terminalFoot}>
-        {liveTerminal ? (
-          <Text style={styles.terminalFootCompactText}>Live PTY</Text>
-        ) : (
+        <View style={styles.terminalFoot}>
           <View style={styles.terminalFootCopy}>
             <Icon name="information-circle-outline" size={15} />
             <Text style={styles.terminalFootText}>
               Terminal snapshot. Drag vertically anywhere to continue through the page.
             </Text>
           </View>
-        )}
-        <View style={styles.terminalFootActions}>
-          {!liveTerminal && captureLines < MAX_CAPTURE_LINES && (
-            <Pressable
-              accessibilityRole="button"
-              onPress={onLoadMore}
-              style={({ pressed }) => [styles.loadMoreButton, pressed && styles.pressed]}
-            >
-              <Icon name="chevron-up-outline" size={14} color={colors.primary} />
-              <Text style={styles.loadMoreButtonText}>Older output</Text>
-            </Pressable>
-          )}
-          <View style={styles.fontSizeControl}>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Decrease terminal font size"
-              disabled={fontSize <= 9}
-              onPress={() => onFontSizeChange(Math.max(9, fontSize - 1))}
-              style={({ pressed }) => [
-                styles.fontSizeButton,
-                pressed && styles.pressed,
-                fontSize <= 9 && styles.disabled,
-              ]}
-            >
-              <Text style={styles.fontSizeButtonText}>A−</Text>
-            </Pressable>
-            <Text style={styles.fontSizeValue}>{fontSize}</Text>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Increase terminal font size"
-              disabled={fontSize >= 18}
-              onPress={() => onFontSizeChange(Math.min(18, fontSize + 1))}
-              style={({ pressed }) => [
-                styles.fontSizeButton,
-                pressed && styles.pressed,
-                fontSize >= 18 && styles.disabled,
-              ]}
-            >
-              <Text style={styles.fontSizeButtonText}>A+</Text>
-            </Pressable>
+          <View style={styles.terminalFootActions}>
+            {captureLines < MAX_CAPTURE_LINES && (
+              <Pressable
+                accessibilityRole="button"
+                onPress={onLoadMore}
+                style={({ pressed }) => [styles.loadMoreButton, pressed && styles.pressed]}
+              >
+                <Icon name="chevron-up-outline" size={14} color={colors.primary} />
+                <Text style={styles.loadMoreButtonText}>Older output</Text>
+              </Pressable>
+            )}
+            <View style={styles.fontSizeControl}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Decrease terminal font size"
+                disabled={fontSize <= 9}
+                onPress={() => onFontSizeChange(Math.max(9, fontSize - 1))}
+                style={({ pressed }) => [
+                  styles.fontSizeButton,
+                  pressed && styles.pressed,
+                  fontSize <= 9 && styles.disabled,
+                ]}
+              >
+                <Text style={styles.fontSizeButtonText}>A−</Text>
+              </Pressable>
+              <Text style={styles.fontSizeValue}>{fontSize}</Text>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Increase terminal font size"
+                disabled={fontSize >= 18}
+                onPress={() => onFontSizeChange(Math.min(18, fontSize + 1))}
+                style={({ pressed }) => [
+                  styles.fontSizeButton,
+                  pressed && styles.pressed,
+                  fontSize >= 18 && styles.disabled,
+                ]}
+              >
+                <Text style={styles.fontSizeButtonText}>A+</Text>
+              </Pressable>
+            </View>
           </View>
         </View>
-      </View>
-      )}
-    </SectionCard>
-    {fullscreen && !keyboardVisible ? (
-      <View style={styles.fullscreenTerminalKeyboard}>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={fullscreenKeysOpen ? 'Hide terminal keys' : 'Show terminal keys'}
-          onPress={() => setFullscreenKeysOpen((current) => !current)}
-          style={({ pressed }) => [
-            styles.terminalKeysToggle,
-            pressed && styles.pressed,
-          ]}
-        >
-          <Icon name="keypad-outline" size={15} color={colors.primary} />
-          <Text style={styles.terminalKeysToggleText}>
-            {fullscreenKeysOpen ? 'Hide keys' : 'Keys'}
-          </Text>
-          <Icon
-            name={fullscreenKeysOpen ? 'chevron-down' : 'chevron-up'}
-            size={13}
-            color={colors.textDim}
+      </SectionCard>
+    );
+  }
+
+  const liveLabel =
+    streamState === 'live'
+      ? '● live'
+      : streamState === 'paused'
+        ? 'paused'
+        : streamState === 'error'
+          ? 'offline'
+          : 'connecting';
+
+  const terminalCard = (
+    <View
+      style={[
+        styles.terminalWebCard,
+        // Height stays a ratio of the window even with the keyboard up: growing
+        // the pane would resize the PTY and make the agent's TUI reflow.
+        fullscreen ? styles.terminalWebCardFullscreen : { height: terminalPaneHeight },
+        keyboardVisible && styles.terminalWebCardKeyboard,
+      ]}
+    >
+      {!keyboardVisible ? (
+        <View style={styles.terminalWebBar}>
+          {fullscreen ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Close full screen terminal"
+              onPress={() => onFullscreenChange(false)}
+              style={({ pressed }) => [
+                styles.terminalWebBarButton,
+                pressed && styles.pressed,
+              ]}
+            >
+              <Icon name="chevron-down" size={16} color={terminalWeb.title} />
+            </Pressable>
+          ) : (
+            <View style={styles.terminalWebGlyph} />
+          )}
+            {/* Short label: the grid readout needs the room more than the word. */}
+            <Text numberOfLines={1} style={styles.terminalWebTitle}>
+              Terminal
+            </Text>
+          <View style={styles.terminalWebBarSpacer} />
+          <View style={styles.terminalWebBarRight}>
+            <Text
+              style={[
+                styles.terminalWebLive,
+                streamState !== 'live' && styles.terminalWebLiveIdle,
+              ]}
+            >
+              {liveLabel}
+            </Text>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={
+                composeOpen ? 'Hide Chinese input' : 'Show Chinese input'
+              }
+              onPress={() => setComposeOpen((current) => !current)}
+              style={({ pressed }) => [
+                styles.terminalWebComposeToggle,
+                composeOpen && styles.terminalWebComposeToggleActive,
+                pressed && styles.pressed,
+              ]}
+            >
+              <Text style={styles.terminalWebComposeGlyph}>中</Text>
+            </Pressable>
+            <View style={styles.fontSizeControlWeb}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Decrease terminal font size"
+                disabled={fontSize <= 9}
+                onPress={() => onFontSizeChange(Math.max(9, fontSize - 1))}
+                style={[styles.fontSizeButtonWeb, fontSize <= 9 && styles.disabled]}
+              >
+                <Text style={styles.fontSizeButtonTextWeb}>A−</Text>
+              </Pressable>
+              {/* The grid is what actually decides whether a TUI fits. */}
+              <Text style={styles.fontSizeValueWeb}>
+                {grid ? `${grid.cols}×${grid.rows}` : fontSize}
+              </Text>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Increase terminal font size"
+                disabled={fontSize >= 18}
+                onPress={() => onFontSizeChange(Math.min(18, fontSize + 1))}
+                style={[styles.fontSizeButtonWeb, fontSize >= 18 && styles.disabled]}
+              >
+                <Text style={styles.fontSizeButtonTextWeb}>A+</Text>
+              </Pressable>
+            </View>
+            {fullscreen ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={
+                  fullscreenKeysOpen ? 'Hide terminal keys' : 'Show terminal keys'
+                }
+                onPress={() => setFullscreenKeysOpen((current) => !current)}
+                style={({ pressed }) => [
+                  styles.terminalWebBarButton,
+                  fullscreenKeysOpen && styles.terminalWebBarButtonActive,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Icon
+                  name="keypad-outline"
+                  size={15}
+                  color={fullscreenKeysOpen ? terminalWeb.accent : terminalWeb.muted}
+                />
+              </Pressable>
+            ) : (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Open full screen terminal"
+                onPress={() => onFullscreenChange(true)}
+                style={({ pressed }) => [
+                  styles.terminalWebBarButton,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Icon name="expand-outline" size={15} color={terminalWeb.muted} />
+              </Pressable>
+            )}
+          </View>
+        </View>
+      ) : null}
+
+      <LiveTerminalView
+        fullscreen={fullscreen}
+        active={appActive}
+        blurRequest={terminalBlurRequest}
+        gatewayUrl={gatewayUrl}
+        gatewayAuthToken={gatewayAuthToken}
+        target={target}
+        fontSize={fontSize}
+        onStateChange={reportStreamState}
+        onFocusChange={onTerminalFocusChange}
+        onGridChange={setGrid}
+      />
+
+      {composeOpen ? (
+        <View style={styles.terminalWebCompose}>
+          <TextInput
+            value={composeText}
+            onChangeText={setComposeText}
+            onFocus={() => onTerminalFocusChange(false)}
+            multiline
+            editable={!composeBusy && streamState === 'live'}
+            placeholder="Type a message — Enter to send"
+            placeholderTextColor="#b8a88c"
+            style={styles.terminalWebComposeInput}
+            blurOnSubmit={false}
+            onSubmitEditing={() => {
+              void submitCompose();
+            }}
           />
-        </Pressable>
-        {fullscreenKeysOpen ? (
-          <TerminalKeyboard
-            disabled={!target || streamState !== 'live'}
-            disabledReason={
-              !target
-                ? 'Start agent to enable'
-                : streamState === 'paused'
-                  ? 'Terminal paused'
-                  : 'Connecting terminal…'
-            }
-            pending={terminalKeyPending}
-            lastKey={lastTerminalKey}
-            error={terminalKeyError}
-            onKey={onTerminalKey}
-          />
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Send text to terminal"
+            disabled={!composeText.trim() || composeBusy || streamState !== 'live'}
+            onPress={() => void submitCompose()}
+            style={({ pressed }) => [
+              styles.terminalWebComposeSend,
+              pressed && styles.pressed,
+              (!composeText.trim() || composeBusy || streamState !== 'live') &&
+                styles.disabled,
+            ]}
+          >
+            <Icon name="arrow-up" size={15} color="#fff" />
+          </Pressable>
+        </View>
+      ) : null}
+    </View>
+  );
+
+  if (fullscreen) {
+    return (
+      <View style={styles.activityTerminalRoot}>
+        {terminalCard}
+        {!keyboardVisible && fullscreenKeysOpen ? (
+          <View style={styles.fullscreenTerminalKeyboard}>
+            <TerminalKeyboard
+              disabled={!target || streamState !== 'live'}
+              disabledReason={
+                !target
+                  ? 'Start agent to enable'
+                  : streamState === 'paused'
+                    ? 'Terminal paused'
+                    : 'Connecting terminal…'
+              }
+              pending={terminalKeyPending}
+              lastKey={lastTerminalKey}
+              error={terminalKeyError}
+              onKey={onTerminalKey}
+            />
+          </View>
         ) : null}
       </View>
-    ) : null}
-    </>
+    );
+  }
+
+  return (
+    <ScrollView
+      style={styles.activityTerminalRoot}
+      contentContainerStyle={styles.activityTerminalScrollContent}
+      keyboardShouldPersistTaps="handled"
+      keyboardDismissMode="interactive"
+      scrollEnabled={!terminalTouch}
+      nestedScrollEnabled
+      showsVerticalScrollIndicator
+    >
+      <View
+        onTouchStart={() => setTerminalTouch(true)}
+        onTouchEnd={() => setTerminalTouch(false)}
+        onTouchCancel={() => setTerminalTouch(false)}
+      >
+        {terminalCard}
+      </View>
+      {!keyboardVisible ? (
+        <PlanPeek
+          detail={detail}
+          open={planOpen}
+          onToggle={() => setPlanOpen((current) => !current)}
+        />
+      ) : null}
+    </ScrollView>
   );
 }
 

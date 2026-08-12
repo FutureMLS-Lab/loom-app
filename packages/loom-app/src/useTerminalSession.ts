@@ -10,7 +10,7 @@ export const MAX_CAPTURE_LINES = 500;
 /** Keys queued beyond this are dropped, so a held key cannot flood the pane. */
 const MAX_QUEUED_KEYS = 6;
 /** Lets the pane redraw before the refresh that reads it back. */
-const KEY_SETTLE_MS = 120;
+const KEY_SETTLE_MS = 45;
 
 type Options = {
   client: LoomClient;
@@ -24,7 +24,7 @@ export function useTerminalSession({ client, onRefresh }: Options) {
   const [keyPending, setKeyPending] = useState(0);
   const [lastKey, setLastKey] = useState<TerminalKey | null>(null);
   const [keyError, setKeyError] = useState('');
-  const [keysOpen, setKeysOpen] = useState(false);
+  const [keysOpen, setKeysOpen] = useState(true);
   const [fullscreen, setFullscreen] = useState(false);
   const [focused, setFocused] = useState(false);
   const [blurRequest, setBlurRequest] = useState(0);
@@ -48,7 +48,7 @@ export function useTerminalSession({ client, onRefresh }: Options) {
     setCaptureLines(INITIAL_CAPTURE_LINES);
     setKeyError('');
     setLastKey(null);
-    setKeysOpen(false);
+    setKeysOpen(true);
     setFullscreen(false);
     setStreamState('connecting');
     setFocused(false);
@@ -83,6 +83,7 @@ export function useTerminalSession({ client, onRefresh }: Options) {
       if (key === 'Escape' || key === 'C-c') {
         dropQueuedKeys();
       } else if (pendingRef.current >= MAX_QUEUED_KEYS) {
+        setKeyError('Keys are catching up — pause a beat, then continue.');
         return;
       }
       const generation = generationRef.current;

@@ -19,3 +19,27 @@ export const colors = {
   amber: '#e7c27d',
   amberMuted: '#443923',
 };
+
+/** Matches Loom web_static Agent Terminal card (cream paper + warm-dark PTY). */
+export const terminalWeb = {
+  card: '#fdf9f1',
+  cardBorder: '#ece0cd',
+  barTop: '#fffdf8',
+  barBottom: '#f8efdd',
+  barBorder: '#efe4d2',
+  title: '#6b5b43',
+  muted: '#8a6d3b',
+  keyBg: '#fffdf8',
+  keyBorder: '#e7d6b3',
+  keyText: '#4a4036',
+  accent: '#4f46e5',
+  accentSoft: 'rgba(79, 70, 229, 0.14)',
+  amber: '#f59e0b',
+  amberText: '#b45309',
+  amberSoft: 'rgba(245, 158, 11, 0.14)',
+  amberRing: 'rgba(245, 158, 11, 0.5)',
+  pty: '#211d1a',
+  glyph: '#34d399',
+  danger: '#e06c5a',
+  dangerSoft: 'rgba(224, 108, 90, 0.14)',
+};

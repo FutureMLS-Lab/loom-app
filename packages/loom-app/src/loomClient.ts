@@ -231,6 +231,14 @@ export class LoomClient {
     });
   }
 
+  /** Reliable IME / long-text path used by Loom web Chinese Input. */
+  async sendText(target: string, text: string): Promise<{ ok?: boolean }> {
+    return this.request<{ ok?: boolean }>('/api/tmux/send-text', {
+      method: 'POST',
+      body: JSON.stringify({ target, text }),
+    });
+  }
+
   async capture(target: string, lines = 180): Promise<TerminalCapture> {
     return this.request<TerminalCapture>(
       `/api/tmux/capture?target=${encodeURIComponent(target)}&lines=${lines}`,

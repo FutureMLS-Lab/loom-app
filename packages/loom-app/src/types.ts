@@ -33,7 +33,8 @@ export type TaskDetail = {
   meta: LoomTask;
   claude?: AgentStatus | null;
   templates?: Record<string, string>;
-  task_markdown_files?: Array<{ name: string; path?: string; content?: string }>;
+  /** The server sends bare file names here; older builds sent objects. */
+  task_markdown_files?: Array<string | { name: string; path?: string; content?: string }>;
   worktree_statuses?: Array<{
     path?: string;
     branch?: string;
@@ -160,7 +161,7 @@ export type TerminalKey =
   | 'Tab'
   | 'BTab'
   | 'Enter'
-  | 'Backspace'
+  | 'BSpace'
   | 'Space'
   | 'Home'
   | 'End'
