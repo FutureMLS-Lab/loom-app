@@ -206,6 +206,22 @@ export function ActivityRing({
   );
 }
 
+/** "Which task was touched last" is the question a task list has to answer. */
+export function relativeTime(value?: string | null): string {
+  if (!value) return '';
+  const then = Date.parse(value);
+  if (!Number.isFinite(then)) return '';
+  const seconds = Math.max(0, Math.round((Date.now() - then) / 1000));
+  if (seconds < 60) return 'just now';
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  if (days < 30) return `${days}d ago`;
+  return new Date(then).toLocaleDateString();
+}
+
 export function TaskRow({
   task,
   selected,
@@ -220,6 +236,7 @@ export function TaskRow({
   pulse?: ActivityPulse;
 }) {
   const hasPane = Boolean(task.tmux_interview_target);
+  const updated = relativeTime(task.updated_at);
   return (
     <Pressable
       accessibilityRole="button"
@@ -245,7 +262,7 @@ export function TaskRow({
           <Text numberOfLines={compact ? 2 : 1} style={styles.taskTitle}>
             {task.title || task.slug}
           </Text>
-          <Text numberOfLines={compact ? 3 : 2} style={styles.taskGoal}>
+          <Text numberOfLines={2} style={styles.taskGoal}>
             {task.general_goal || 'No task description'}
           </Text>
         </View>
@@ -255,6 +272,7 @@ export function TaskRow({
           <View style={[styles.miniDot, hasPane && styles.miniDotLive]} />
           <Text style={styles.taskMetaText}>{task.agent || 'cursor'}</Text>
         </View>
+        {updated ? <Text style={styles.taskMetaText}>· {updated}</Text> : null}
         <Text numberOfLines={1} style={[styles.taskMetaText, styles.taskMetaModel]}>
           {task.interview_model || task.kind || 'agent'}
         </Text>

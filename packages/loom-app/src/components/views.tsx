@@ -10,12 +10,12 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Markdown from 'react-native-markdown-display';
-import { useState } from 'react';
+import { memo, useMemo, useState } from 'react';
 
 import { projectLabel } from '../loomClient';
 import { markdownStyles, styles } from '../styles';
 import { colors } from '../theme';
-import type { LoomProject, TaskDetail, TaskDiff } from '../types';
+import type { DiffFile, LoomProject, TaskDetail, TaskDiff } from '../types';
 import { EmptyState, Icon, SectionCard } from './primitives';
 
 const DIFF_PREVIEW_LIMIT = 8000;
@@ -150,7 +150,17 @@ export function ProjectPickerModal({
           <FlatList
             data={projects}
             keyExtractor={(project) => project.id}
-            contentContainerStyle={styles.projectModalList}
+            contentContainerStyle={[
+              styles.projectModalList,
+              !projects.length && styles.projectModalListEmpty,
+            ]}
+            ListEmptyComponent={
+              <EmptyState
+                icon="folder-open-outline"
+                title="No projects yet"
+                detail="Add a directory that already exists on the machine running Loom."
+              />
+            }
             showsVerticalScrollIndicator
             renderItem={({ item }) => {
               const selected = item.id === selectedId;
@@ -219,6 +229,56 @@ export function ProjectPickerModal({
   );
 }
 
+/** A task can touch dozens of files; laying every patch out at once is what
+ *  makes this screen crawl, so each file opens on demand. */
+function DiffFileRow({ file }: { file: DiffFile }) {
+  const [open, setOpen] = useState(false);
+  const patch = file.patch || file.diff || '';
+
+  return (
+    <View style={styles.diffFile}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityState={{ expanded: open }}
+        accessibilityLabel={`${open ? 'Collapse' : 'Expand'} diff for ${file.path}`}
+        disabled={!patch}
+        onPress={() => setOpen((current) => !current)}
+        style={({ pressed }) => [styles.diffFileHeader, pressed && patch && styles.pressed]}
+      >
+        <View style={styles.diffFileName}>
+          <Icon
+            name={patch ? (open ? 'chevron-down' : 'chevron-forward') : 'document-text-outline'}
+            size={15}
+            color={colors.textMuted}
+          />
+          <Text numberOfLines={1} ellipsizeMode="head" style={styles.diffPath}>
+            {file.path}
+          </Text>
+        </View>
+        <View style={styles.diffStats}>
+          {typeof file.additions === 'number' && (
+            <Text style={styles.additions}>+{file.additions}</Text>
+          )}
+          {typeof file.deletions === 'number' && (
+            <Text style={styles.deletions}>−{file.deletions}</Text>
+          )}
+          {file.status && <Text style={styles.diffStatus}>{file.status}</Text>}
+        </View>
+      </Pressable>
+      {open && patch ? <DiffPatch content={patch} /> : null}
+    </View>
+  );
+}
+
+function diffLineStyle(line: string) {
+  if (line.startsWith('+++') || line.startsWith('---')) return styles.patchMeta;
+  if (line.startsWith('@@')) return styles.patchHunk;
+  if (line.startsWith('+')) return styles.patchAdded;
+  if (line.startsWith('-')) return styles.patchRemoved;
+  if (line.startsWith('diff ') || line.startsWith('index ')) return styles.patchMeta;
+  return undefined;
+}
+
 export function DiffPatch({ content }: { content: string }) {
   const [expanded, setExpanded] = useState(false);
   const truncated = content.length > DIFF_PREVIEW_LIMIT;
@@ -228,7 +288,13 @@ export function DiffPatch({ content }: { content: string }) {
     <View style={styles.patchShell}>
       <View style={styles.patch}>
         <Text selectable style={styles.patchText}>
-          {visibleContent}
+          {/* Colouring the gutter is what makes a diff readable at a glance. */}
+          {visibleContent.split('\n').map((line, index) => (
+            <Text key={index} style={diffLineStyle(line)}>
+              {line}
+              {'\n'}
+            </Text>
+          ))}
         </Text>
       </View>
       {truncated && (
@@ -248,12 +314,21 @@ export function DiffPatch({ content }: { content: string }) {
 }
 
 
+function worktreeLabel(path?: string): string {
+  const parts = (path || '').replace(/\/+$/, '').split('/');
+  return parts[parts.length - 1] || 'worktree';
+}
+
 export function ChangesView({ diff }: { diff: TaskDiff | null }) {
   const worktrees = diff?.worktrees || [];
   const files = worktrees.flatMap((worktree) =>
     (worktree.files || []).map((file) => ({ worktree, file })),
   );
   const errors = worktrees.filter((worktree) => worktree.error);
+  // A task can span several repos; without the grouping the same file name
+  // from two worktrees is indistinguishable.
+  const grouped = worktrees.filter((worktree) => (worktree.files || []).length);
+  const showGroups = grouped.length > 1;
 
   return (
     <SectionCard
@@ -282,28 +357,29 @@ export function ChangesView({ diff }: { diff: TaskDiff | null }) {
               </View>
             </View>
           ))}
-          {files.map(({ worktree, file }, index) => (
-            <View key={`${worktree.path || 'worktree'}:${file.path}:${index}`} style={styles.diffFile}>
-              <View style={styles.diffFileHeader}>
-                <View style={styles.diffFileName}>
-                  <Icon name="document-text-outline" size={16} color={colors.textMuted} />
-                  <Text numberOfLines={1} style={styles.diffPath}>
-                    {file.path}
+          {grouped.map((worktree) => (
+            <View key={worktree.path || worktreeLabel(worktree.path)}>
+              {showGroups ? (
+                <View style={styles.diffGroupHeader}>
+                  <Text numberOfLines={1} style={styles.diffGroupName}>
+                    {worktreeLabel(worktree.path)}
+                  </Text>
+                  <Text numberOfLines={1} style={styles.diffGroupMeta}>
+                    {worktree.branch
+                      ? `${worktree.branch}${worktree.base ? ` → ${worktree.base}` : ''}`
+                      : ''}
+                  </Text>
+                  <Text style={styles.diffGroupCount}>
+                    {(worktree.files || []).length}
                   </Text>
                 </View>
-                <View style={styles.diffStats}>
-                  {typeof file.additions === 'number' && (
-                    <Text style={styles.additions}>+{file.additions}</Text>
-                  )}
-                  {typeof file.deletions === 'number' && (
-                    <Text style={styles.deletions}>−{file.deletions}</Text>
-                  )}
-                  {file.status && <Text style={styles.diffStatus}>{file.status}</Text>}
-                </View>
-              </View>
-              {(file.patch || file.diff) && (
-                <DiffPatch content={file.patch || file.diff || ''} />
-              )}
+              ) : null}
+              {(worktree.files || []).map((file, index) => (
+                <DiffFileRow
+                  key={`${worktree.path || 'worktree'}:${file.path}:${index}`}
+                  file={file}
+                />
+              ))}
             </View>
           ))}
         </View>
@@ -348,17 +424,25 @@ export function MarkdownDocument({
           {content}
         </Text>
       ) : (
-        <View style={styles.markdownDocument}>
-          <Markdown mergeStyle style={markdownStyles}>
-            {content}
-          </Markdown>
-        </View>
+        <MarkdownBody content={content} />
       )}
     </SectionCard>
   );
 }
 
-export function NotesView({ detail }: { detail: TaskDetail | null }) {
+const MarkdownBody = memo(function MarkdownBody({ content }: { content: string }) {
+  return (
+    <View style={styles.markdownDocument}>
+      <Markdown mergeStyle style={markdownStyles}>
+        {content}
+      </Markdown>
+    </View>
+  );
+});
+
+export function collectTaskDocuments(
+  detail: TaskDetail | null,
+): Array<{ name: string; content: string }> {
   const documents: Array<{ name: string; content: string }> = [];
   const seen = new Set<string>();
 
@@ -368,6 +452,7 @@ export function NotesView({ detail }: { detail: TaskDetail | null }) {
     seen.add(name.toLowerCase());
   }
   for (const file of detail?.task_markdown_files || []) {
+    if (typeof file === 'string') continue;
     if (!file.content || seen.has(file.name.toLowerCase())) continue;
     documents.push({ name: file.name, content: file.content });
     seen.add(file.name.toLowerCase());
@@ -381,6 +466,114 @@ export function NotesView({ detail }: { detail: TaskDetail | null }) {
     };
     return rank(left.name) - rank(right.name) || left.name.localeCompare(right.name);
   });
+  return documents;
+}
+
+/** Re-parsing markdown on every task poll is what makes the pane stutter. */
+const PlanPeekBody = memo(function PlanPeekBody({ content }: { content: string }) {
+  return (
+    <View style={styles.planPeekBody}>
+      <Markdown mergeStyle style={planPeekMarkdownStyles}>
+        {content}
+      </Markdown>
+    </View>
+  );
+});
+
+/** Compact PLAN.md strip under the terminal, matching Loom web interview layout. */
+export function PlanPeek({
+  detail,
+  open = true,
+  onToggle,
+}: {
+  detail: TaskDetail | null;
+  open?: boolean;
+  onToggle?: () => void;
+}) {
+  const plan = useMemo(() => {
+    const documents = collectTaskDocuments(detail);
+    return documents.find((doc) => doc.name.toLowerCase() === 'plan.md') || documents[0];
+  }, [detail]);
+
+  return (
+    <View style={styles.planPeek}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={open ? 'Collapse plan' : 'Expand plan'}
+        onPress={onToggle}
+        style={({ pressed }) => [styles.planPeekBar, pressed && styles.pressed]}
+      >
+        <Text style={styles.planPeekTitle}>{plan?.name || 'PLAN.md'}</Text>
+        <Text style={styles.planPeekHint}>{open ? 'Hide' : 'Show'}</Text>
+      </Pressable>
+      {open ? (
+        plan?.content ? (
+          <PlanPeekBody content={plan.content} />
+        ) : (
+          <Text style={styles.planPeekEmpty}>
+            PLAN.md will appear here once the agent writes it.
+          </Text>
+        )
+      ) : null}
+    </View>
+  );
+}
+
+const planPeekMarkdownStyles = StyleSheet.create({
+  ...markdownStyles,
+  body: {
+    ...markdownStyles.body,
+    color: '#4a4036',
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  heading1: {
+    ...markdownStyles.heading1,
+    color: '#3f3428',
+    fontSize: 16,
+    lineHeight: 22,
+    marginTop: 4,
+    marginBottom: 8,
+  },
+  heading2: {
+    ...markdownStyles.heading2,
+    color: '#3f3428',
+    fontSize: 14,
+    lineHeight: 20,
+    marginTop: 8,
+    marginBottom: 6,
+  },
+  heading3: {
+    ...markdownStyles.heading3,
+    color: '#4a4036',
+    fontSize: 13,
+    lineHeight: 18,
+    marginTop: 6,
+    marginBottom: 4,
+  },
+  paragraph: { marginTop: 0, marginBottom: 8 },
+  bullet_list: { marginBottom: 6 },
+  ordered_list: { marginBottom: 6 },
+  list_item: { marginBottom: 2 },
+  code_inline: {
+    backgroundColor: 'rgba(120, 90, 40, 0.08)',
+    color: '#6b5b43',
+    borderRadius: 4,
+    paddingHorizontal: 4,
+    fontSize: 11,
+  },
+  fence: {
+    backgroundColor: 'rgba(120, 90, 40, 0.06)',
+    color: '#4a4036',
+    borderRadius: 8,
+    padding: 8,
+    fontSize: 11,
+    marginBottom: 8,
+  },
+});
+
+export function NotesView({ detail }: { detail: TaskDetail | null }) {
+  const documents = collectTaskDocuments(detail);
 
   if (!documents.length) {
     return (
