@@ -23,7 +23,27 @@ import type {
 } from '../types';
 import { EmptyState, Icon, type IconName, loomIcon } from './primitives';
 
-function ConversationToolCard({ tool }: { tool: ConversationTool }) {
+/** A single tool can return megabytes; laying all of it out freezes the list. */
+const TOOL_TEXT_LIMIT = 4000;
+
+function looksLikePath(value: string): boolean {
+  return value.startsWith('/') && !value.includes(' ') && value.lastIndexOf('/') > 0;
+}
+
+function clampToolText(value: string): string {
+  if (value.length <= TOOL_TEXT_LIMIT) return value;
+  const dropped = value.length - TOOL_TEXT_LIMIT;
+  return `${value.slice(0, TOOL_TEXT_LIMIT)}\n\n… ${dropped.toLocaleString()} more characters`;
+}
+
+function ConversationToolCard({
+  tool,
+  repeatsName,
+}: {
+  tool: ConversationTool;
+  /** True when the row above ran the same tool, so the name is just noise. */
+  repeatsName?: boolean;
+}) {
   const [expanded, setExpanded] = useState(false);
   const hasDetails = Boolean(tool.input || tool.output);
   const status =
@@ -36,10 +56,20 @@ function ConversationToolCard({ tool }: { tool: ConversationTool }) {
           : { icon: 'checkmark-circle-outline' as IconName, color: colors.green, label: 'Done' };
 
   return (
-    <View style={styles.conversationTool}>
+    <View
+      style={[
+        styles.conversationTool,
+        tool.status === 'running' && styles.conversationToolActive,
+        tool.status === 'error' && styles.conversationToolFailed,
+      ]}
+    >
       <Pressable
         accessibilityRole={hasDetails ? 'button' : undefined}
-        accessibilityLabel={hasDetails ? `${expanded ? 'Collapse' : 'Expand'} ${tool.name}` : undefined}
+        accessibilityLabel={
+          hasDetails
+            ? `${expanded ? 'Collapse' : 'Expand'} ${tool.name}, ${status.label}`
+            : `${tool.name}, ${status.label}`
+        }
         disabled={!hasDetails}
         onPress={() => setExpanded((current) => !current)}
         style={({ pressed }) => [
@@ -47,29 +77,35 @@ function ConversationToolCard({ tool }: { tool: ConversationTool }) {
           pressed && hasDetails && styles.pressed,
         ]}
       >
-        <View style={styles.conversationToolIcon}>
-          <Icon name="terminal-outline" size={15} color={colors.primary} />
-        </View>
-        <View style={styles.conversationToolCopy}>
-          <View style={styles.conversationToolTitleRow}>
-            <Text numberOfLines={1} style={styles.conversationToolName}>
-              {tool.name}
-            </Text>
-            <View style={styles.conversationToolStatus}>
-              <Icon name={status.icon} size={13} color={status.color} />
-              <Text style={[styles.conversationToolStatusText, { color: status.color }]}>
-                {status.label}
-              </Text>
-            </View>
-          </View>
-          <Text numberOfLines={2} style={styles.conversationToolSummary}>
-            {tool.summary || tool.name}
+        {/* One line per call: the status colour carries the state, so the row
+            can stay dense enough to scan a long run at a glance. */}
+        <Icon name={status.icon} size={14} color={status.color} />
+        <Text
+          numberOfLines={1}
+          style={[
+            styles.conversationToolName,
+            repeatsName && styles.conversationToolNameRepeat,
+          ]}
+        >
+          {tool.name}
+        </Text>
+        {tool.summary ? (
+          <Text
+            numberOfLines={1}
+            // A path's filename is the useful half, so clip the directories.
+            // Slash commands also start with "/", so require a real path shape.
+            ellipsizeMode={looksLikePath(tool.summary) ? 'head' : 'tail'}
+            style={styles.conversationToolSummary}
+          >
+            {tool.summary}
           </Text>
-        </View>
+        ) : (
+          <View style={styles.conversationToolSpacer} />
+        )}
         {hasDetails ? (
           <Icon
             name={expanded ? 'chevron-up' : 'chevron-down'}
-            size={15}
+            size={14}
             color={colors.textDim}
           />
         ) : null}
@@ -80,7 +116,7 @@ function ConversationToolCard({ tool }: { tool: ConversationTool }) {
             <View style={styles.conversationToolSection}>
               <Text style={styles.conversationToolSectionLabel}>Input</Text>
               <Text selectable style={styles.conversationToolCode}>
-                {tool.input}
+                {clampToolText(tool.input)}
               </Text>
             </View>
           ) : null}
@@ -88,12 +124,61 @@ function ConversationToolCard({ tool }: { tool: ConversationTool }) {
             <View style={styles.conversationToolSection}>
               <Text style={styles.conversationToolSectionLabel}>Result</Text>
               <Text selectable style={styles.conversationToolCode}>
-                {tool.output}
+                {clampToolText(tool.output)}
               </Text>
             </View>
           ) : null}
         </View>
       ) : null}
+    </View>
+  );
+}
+
+/** Pasted prompts run to hundreds of lines; a wall of them buries the reply. */
+const USER_MESSAGE_CLAMP_LINES = 12;
+/** Slash commands arrive wrapped in these; the tags are noise to a reader. */
+const COMMAND_WRAPPER_TAGS = /<\/?command-(?:args|name|message|contents)>/g;
+
+function readableUserText(value: string): string {
+  return value.replace(COMMAND_WRAPPER_TAGS, '').trim();
+}
+
+function ConversationUserBubble({ message }: { message: ConversationMessage }) {
+  const [expanded, setExpanded] = useState(false);
+  const text = readableUserText(message.text || '');
+  const clampable = text.split('\n').length > USER_MESSAGE_CLAMP_LINES || text.length > 700;
+
+  return (
+    <View style={styles.conversationUserRow}>
+      <View style={styles.conversationUserBubble}>
+        <Text
+          selectable
+          numberOfLines={clampable && !expanded ? USER_MESSAGE_CLAMP_LINES : undefined}
+          style={styles.conversationUserText}
+        >
+          {text}
+        </Text>
+        {clampable ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={expanded ? 'Collapse message' : 'Show full message'}
+            onPress={() => setExpanded((current) => !current)}
+            style={({ pressed }) => [
+              styles.conversationUserExpand,
+              pressed && styles.pressed,
+            ]}
+          >
+            <Text style={styles.conversationUserExpandText}>
+              {expanded ? 'Show less' : 'Show more'}
+            </Text>
+          </Pressable>
+        ) : null}
+        {message.delivery ? (
+          <Text style={styles.conversationUserDelivery}>
+            {message.delivery === 'sending' ? 'Sending…' : 'Queued'}
+          </Text>
+        ) : null}
+      </View>
     </View>
   );
 }
@@ -301,11 +386,13 @@ function ConversationQuestionCard({
 
 const ConversationMessageRow = memo(function ConversationMessageRow({
   message,
+  repeatsToolName,
   answering,
   answerFeedback,
   onAnswer,
 }: {
   message: ConversationMessage;
+  repeatsToolName?: boolean;
   answering: boolean;
   answerFeedback: string;
   onAnswer: (
@@ -315,7 +402,7 @@ const ConversationMessageRow = memo(function ConversationMessageRow({
   ) => void;
 }) {
   if (message.kind === 'tool' && message.tool) {
-    return <ConversationToolCard tool={message.tool} />;
+    return <ConversationToolCard tool={message.tool} repeatsName={repeatsToolName} />;
   }
   if (message.kind === 'question' && message.question) {
     return (
@@ -335,20 +422,7 @@ const ConversationMessageRow = memo(function ConversationMessageRow({
     );
   }
   if (message.kind === 'user') {
-    return (
-      <View style={styles.conversationUserRow}>
-        <View style={styles.conversationUserBubble}>
-          <Text selectable style={styles.conversationUserText}>
-            {message.text}
-          </Text>
-          {message.delivery ? (
-            <Text style={styles.conversationUserDelivery}>
-              {message.delivery === 'sending' ? 'Sending…' : 'Queued'}
-            </Text>
-          ) : null}
-        </View>
-      </View>
-    );
+    return <ConversationUserBubble message={message} />;
   }
   return (
     <View style={styles.conversationAgentRow}>
@@ -473,15 +547,28 @@ export function ConversationView({
     [],
   );
 
+  // Read through a ref so a poll does not hand FlatList a new renderItem and
+  // force every visible row to re-render.
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
+
   const renderItem = useCallback(
-    ({ item }: { item: ConversationMessage }) => (
-      <ConversationMessageRow
-        message={item}
-        answering={answering}
-        answerFeedback={answerFeedback}
-        onAnswer={onAnswer}
-      />
-    ),
+    ({ item, index }: { item: ConversationMessage; index: number }) => {
+      const previous = index > 0 ? messagesRef.current[index - 1] : undefined;
+      return (
+        <ConversationMessageRow
+          message={item}
+          repeatsToolName={
+            item.kind === 'tool' &&
+            previous?.kind === 'tool' &&
+            previous.tool?.name === item.tool?.name
+          }
+          answering={answering}
+          answerFeedback={answerFeedback}
+          onAnswer={onAnswer}
+        />
+      );
+    },
     [answerFeedback, answering, onAnswer],
   );
 
