@@ -1,6 +1,8 @@
 import http from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Readable } from 'node:stream';
 
 const host = process.env.LOOM_APP_HOST || '127.0.0.1';
@@ -12,6 +14,37 @@ const loomBaseUrl = (process.env.LOOM_BASE_URL || 'http://127.0.0.1:8765').repla
 const loomToken = process.env.LOOM_WEB_AUTH_TOKEN || '';
 const gatewayToken = process.env.LOOM_APP_AUTH_TOKEN || '';
 const allowedOrigin = process.env.LOOM_APP_ORIGIN || '*';
+// The Expo Web export (`pnpm web:export` → dist/). When present the gateway
+// serves it, so a phone on any network needs exactly one URL — no Metro, no
+// second server. Behind the same auth as the API.
+const webDist = path.resolve(
+  process.env.LOOM_APP_WEB_DIST ||
+    path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'dist'),
+);
+const webDistAvailable = await stat(path.join(webDist, 'index.html'))
+  .then((info) => info.isFile())
+  .catch(() => false);
+
+const WEB_MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.map': 'application/json; charset=utf-8',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon',
+  '.webp': 'image/webp',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf',
+  '.otf': 'font/otf',
+  '.txt': 'text/plain; charset=utf-8',
+};
 const xtermEntryUrl = import.meta.resolve('@xterm/xterm');
 const xtermJs = await readFile(new URL(xtermEntryUrl));
 const xtermCss = await readFile(new URL('../css/xterm.css', xtermEntryUrl));
@@ -702,6 +735,15 @@ function clientToken(request) {
   if (authorization.toLowerCase().startsWith('bearer ')) {
     return authorization.slice(7).trim();
   }
+  // A browser's first visit cannot set a header: `?token=…` bootstraps the
+  // session, and the cookie set on the HTML response carries it from there.
+  try {
+    const queryToken = new URL(request.url || '/', 'http://gateway')
+      .searchParams.get('token');
+    if (queryToken && queryToken.trim()) return queryToken.trim();
+  } catch {
+    // Malformed URL: fall through to the cookie.
+  }
   const cookie = String(request.headers.cookie || '');
   const match = cookie.match(/(?:^|;\s*)loom_gateway_session=([^;]+)/);
   return match ? decodeURIComponent(match[1]) : '';
@@ -722,6 +764,9 @@ function gatewaySessionCookie(request) {
     'Path=/',
     'HttpOnly',
     'SameSite=Strict',
+    // Survives Safari restarts and home-screen launches; without it the
+    // phone would need the ?token= bootstrap every session.
+    'Max-Age=2592000',
     secure ? 'Secure' : '',
   ]
     .filter(Boolean)
@@ -801,6 +846,45 @@ function responseHeaders(upstream) {
     headers[key] = value;
   }
   return headers;
+}
+
+/// The exported web app, from dist/. Routes the client router owns fall
+/// back to index.html; hashed assets cache hard, the shell never does. An
+/// authorized HTML response refreshes the session cookie so the ?token=
+/// bootstrap is only ever needed once.
+async function serveWebApp(pathname, request, response) {
+  if (!webDistAvailable || request.method !== 'GET') return false;
+  let relative;
+  try {
+    relative = path.posix.normalize(decodeURIComponent(pathname)).replace(/^\/+/, '');
+  } catch {
+    return false;
+  }
+  let filePath = path.resolve(webDist, relative || 'index.html');
+  if (filePath !== webDist && !filePath.startsWith(webDist + path.sep)) return false;
+  let info = await stat(filePath).catch(() => null);
+  if (info?.isDirectory()) {
+    filePath = path.join(filePath, 'index.html');
+    info = await stat(filePath).catch(() => null);
+  }
+  if (!info?.isFile()) {
+    if (path.extname(relative)) return false;
+    filePath = path.join(webDist, 'index.html');
+    info = await stat(filePath).catch(() => null);
+    if (!info?.isFile()) return false;
+  }
+  const ext = path.extname(filePath).toLowerCase();
+  const isHtml = ext === '.html';
+  const body = await readFile(filePath);
+  sendBuffer(
+    response,
+    200,
+    WEB_MIME[ext] || 'application/octet-stream',
+    body,
+    isHtml ? 'no-store' : 'public, max-age=3600',
+    isHtml && gatewayToken ? { 'Set-Cookie': gatewaySessionCookie(request) } : {},
+  );
+  return true;
 }
 
 async function proxy(request, response) {
@@ -901,6 +985,17 @@ const server = http.createServer(async (request, response) => {
     return;
   }
 
+  if (!incomingUrl.pathname.startsWith('/api/')) {
+    try {
+      if (await serveWebApp(incomingUrl.pathname, request, response)) return;
+    } catch (error) {
+      sendJson(response, 500, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
+  }
+
   try {
     await proxy(request, response);
   } catch (error) {
@@ -918,6 +1013,11 @@ server.listen(port, host, () => {
   console.log(`Loom App gateway: http://${host}:${port}`);
   console.log(`Loom backend: ${loomBaseUrl}`);
   console.log(`Gateway auth: ${gatewayToken ? 'enabled' : 'disabled'}`);
+  console.log(
+    webDistAvailable
+      ? `Web app: serving ${webDist}`
+      : 'Web app: no dist/ export found (API-only gateway)',
+  );
   if (host !== '127.0.0.1' && host !== '::1') {
     console.warn('Gateway is listening beyond localhost; place it behind TLS and authentication.');
   }
