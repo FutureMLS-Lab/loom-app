@@ -70,8 +70,18 @@ agent session transcript and expose structured messages over SSE/WebSocket.
 That will replace the terminal snapshot with native Happy-style message and
 permission cards without changing Loom itself.
 
-## Open-source attribution
+## Attribution
 
-This app follows the Expo product patterns and visual direction of
-[Happy](https://github.com/slopus/happy). Happy is MIT licensed; this
-repository retains its `LICENSE` and copyright notice.
+The product patterns and visual direction follow
+[Happy](https://github.com/slopus/happy), which is MIT licensed. No Happy
+source code is included here — this client was written against Loom's own
+API — so the copyright in this repository is ours and the licence below is
+ours to set. The credit stands regardless: the shape of this app came from
+reading theirs.
+
+## Licence
+
+Noncommercial use only, under the
+[PolyForm Noncommercial 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0)
+terms in [`LICENSE`](LICENSE). Commercial use needs a separate licence from
+FutureMLS-Lab.
