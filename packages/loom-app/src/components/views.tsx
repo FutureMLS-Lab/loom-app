@@ -13,6 +13,7 @@ import Markdown from 'react-native-markdown-display';
 import { memo, useMemo, useState } from 'react';
 
 import { projectLabel } from '../loomClient';
+import { type LoomServer, serverLabel, suggestedName } from '../servers';
 import { markdownStyles, styles } from '../styles';
 import { colors } from '../theme';
 import type { DiffFile, LoomProject, TaskDetail, TaskDiff } from '../types';
@@ -277,6 +278,238 @@ function diffLineStyle(line: string) {
   if (line.startsWith('-')) return styles.patchRemoved;
   if (line.startsWith('diff ') || line.startsWith('index ')) return styles.patchMeta;
   return undefined;
+}
+
+export function ServerPickerModal({
+  visible,
+  servers,
+  activeId,
+  onSelect,
+  onSave,
+  onRemove,
+  onCreate,
+  onClose,
+}: {
+  visible: boolean;
+  servers: LoomServer[];
+  activeId: string;
+  onSelect: (id: string) => void;
+  onSave: (server: LoomServer) => boolean;
+  onRemove: (id: string) => void;
+  onCreate: () => LoomServer;
+  onClose: () => void;
+}) {
+  const [draft, setDraft] = useState<LoomServer | null>(null);
+  const [saveError, setSaveError] = useState('');
+
+  const closeEditor = () => {
+    setDraft(null);
+    setSaveError('');
+  };
+
+  const submit = () => {
+    if (!draft) return;
+    if (!onSave(draft)) {
+      setSaveError('Enter a full URL, including http:// or https://.');
+      return;
+    }
+    closeEditor();
+    onClose();
+  };
+
+  return (
+    <Modal animationType="slide" transparent visible={visible} onRequestClose={onClose}>
+      <SafeAreaView style={styles.projectModalOverlay}>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Close server picker"
+          onPress={onClose}
+          style={StyleSheet.absoluteFill}
+        />
+        <View style={styles.projectModalSheet}>
+          <View style={styles.projectModalHandle} />
+          <View style={styles.projectModalHeader}>
+            <View>
+              <Text style={styles.projectModalTitle}>Servers</Text>
+              <Text style={styles.projectModalSubtitle}>
+                {draft
+                  ? 'Each server keeps its own URL and token'
+                  : `${servers.length} configured`}
+              </Text>
+            </View>
+            <View style={styles.projectModalHeaderActions}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={draft ? 'Cancel editing server' : 'Add server'}
+                onPress={() => {
+                  if (draft) {
+                    closeEditor();
+                    return;
+                  }
+                  setSaveError('');
+                  setDraft(onCreate());
+                }}
+                style={({ pressed }) => [styles.projectAddButton, pressed && styles.pressed]}
+              >
+                <Icon name={draft ? 'remove' : 'add'} size={17} color={colors.primary} />
+                <Text style={styles.projectAddButtonText}>{draft ? 'Cancel' : 'Add'}</Text>
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Close"
+                onPress={onClose}
+                style={styles.iconButton}
+              >
+                <Icon name="close" color={colors.text} />
+              </Pressable>
+            </View>
+          </View>
+
+          {draft ? (
+            <View style={styles.projectAddPanel}>
+              <Text style={styles.serverFieldLabel}>Name</Text>
+              <TextInput
+                value={draft.name}
+                onChangeText={(name) => setDraft({ ...draft, name })}
+                autoCapitalize="none"
+                autoCorrect={false}
+                placeholder={suggestedName(draft.url)}
+                placeholderTextColor={colors.textDim}
+                style={styles.serverInput}
+              />
+              <Text style={styles.serverFieldLabel}>Gateway URL</Text>
+              <TextInput
+                value={draft.url}
+                onChangeText={(url) => setDraft({ ...draft, url })}
+                autoCapitalize="none"
+                autoCorrect={false}
+                keyboardType="url"
+                placeholder="https://loom-gateway.example.com"
+                placeholderTextColor={colors.textDim}
+                style={styles.serverInput}
+              />
+              <Text style={styles.serverFieldLabel}>Auth token</Text>
+              <TextInput
+                value={draft.token}
+                onChangeText={(token) => setDraft({ ...draft, token })}
+                autoCapitalize="none"
+                autoCorrect={false}
+                secureTextEntry
+                placeholder="Leave empty to use this build's token"
+                placeholderTextColor={colors.textDim}
+                style={styles.serverInput}
+                onSubmitEditing={submit}
+              />
+              {saveError ? (
+                <View style={styles.projectMutationError}>
+                  <Icon name="warning-outline" color={colors.red} size={16} />
+                  <Text style={styles.projectMutationErrorText}>{saveError}</Text>
+                </View>
+              ) : null}
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Save server and connect"
+                onPress={submit}
+                style={({ pressed }) => [styles.serverSaveButton, pressed && styles.pressed]}
+              >
+                <Text style={styles.serverSaveButtonText}>Save & connect</Text>
+              </Pressable>
+            </View>
+          ) : (
+            <FlatList
+              data={servers}
+              keyExtractor={(server) => server.id}
+              contentContainerStyle={styles.projectModalList}
+              showsVerticalScrollIndicator
+              renderItem={({ item }) => {
+                const selected = item.id === activeId;
+                return (
+                  <View
+                    style={[
+                      styles.projectModalRow,
+                      selected && styles.projectModalRowSelected,
+                    ]}
+                  >
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityState={{ selected }}
+                      accessibilityLabel={`Switch to ${serverLabel(item)}`}
+                      onPress={() => {
+                        onSelect(item.id);
+                        onClose();
+                      }}
+                      style={({ pressed }) => [
+                        styles.projectModalSelect,
+                        pressed && styles.pressed,
+                      ]}
+                    >
+                      <View
+                        style={[
+                          styles.projectModalIcon,
+                          selected && styles.projectModalIconSelected,
+                        ]}
+                      >
+                        <Icon
+                          name="server-outline"
+                          color={selected ? colors.primary : colors.textMuted}
+                        />
+                      </View>
+                      <View style={styles.projectModalCopy}>
+                        <Text
+                          numberOfLines={1}
+                          style={[
+                            styles.projectModalName,
+                            selected && styles.projectModalNameSelected,
+                          ]}
+                        >
+                          {serverLabel(item)}
+                        </Text>
+                        <Text numberOfLines={1} style={styles.projectModalPath}>
+                          {item.url}
+                        </Text>
+                      </View>
+                      {selected && (
+                        <Icon name="checkmark-circle" color={colors.primary} size={21} />
+                      )}
+                    </Pressable>
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel={`Edit ${serverLabel(item)}`}
+                      onPress={() => {
+                        setSaveError('');
+                        setDraft({ ...item });
+                      }}
+                      hitSlop={8}
+                      style={({ pressed }) => [
+                        styles.projectRemoveButton,
+                        pressed && styles.pressed,
+                      ]}
+                    >
+                      <Icon name="create-outline" color={colors.textDim} size={19} />
+                    </Pressable>
+                    {servers.length > 1 ? (
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityLabel={`Remove ${serverLabel(item)}`}
+                        onPress={() => onRemove(item.id)}
+                        hitSlop={8}
+                        style={({ pressed }) => [
+                          styles.projectRemoveButton,
+                          pressed && styles.pressed,
+                        ]}
+                      >
+                        <Icon name="close-circle-outline" color={colors.textDim} size={19} />
+                      </Pressable>
+                    ) : null}
+                  </View>
+                );
+              }}
+            />
+          )}
+        </View>
+      </SafeAreaView>
+    </Modal>
+  );
 }
 
 export function DiffPatch({ content }: { content: string }) {

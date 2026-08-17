@@ -36,11 +36,7 @@ import {
   type ReactNode,
 } from 'react';
 
-import {
-  agentTarget,
-  DEFAULT_GATEWAY_AUTH_TOKEN,
-  projectLabel,
-} from './src/loomClient';
+import { agentTarget, projectLabel } from './src/loomClient';
 import type {
   ConversationFeed,
   ConversationMessage,
@@ -61,9 +57,12 @@ import {
 } from './src/styles';
 import { colors } from './src/theme';
 import {
+  ACTIVE_SERVER_KEY,
   GATEWAY_URL_KEY,
+  SERVERS_KEY,
   useGatewayConnection,
 } from './src/useGatewayConnection';
+import { serverLabel } from './src/servers';
 import { useActivityPulse } from './src/useActivityPulse';
 import { useConversationFeed } from './src/useConversationFeed';
 import {
@@ -90,6 +89,7 @@ import {
   ChangesView,
   NotesView,
   ProjectPickerModal,
+  ServerPickerModal,
 } from './src/components/views';
 
 const AGENT_WORKING_PATTERN =
@@ -121,6 +121,7 @@ function LoomApp() {
   const [query, setQuery] = useState('');
   const [message, setMessage] = useState('');
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
+  const [serverPickerOpen, setServerPickerOpen] = useState(false);
   const [projectMutationBusy, setProjectMutationBusy] = useState(false);
   const [projectMutationError, setProjectMutationError] = useState('');
   const [loading, setLoading] = useState(true);
@@ -461,6 +462,8 @@ function LoomApp() {
       SELECTED_TAB_KEY,
       SELECTED_TASK_KEY,
       GATEWAY_URL_KEY,
+      SERVERS_KEY,
+      ACTIVE_SERVER_KEY,
     ])
       .then((entries) => {
         if (cancelled) return;
@@ -481,7 +484,11 @@ function LoomApp() {
         ) {
           setTab(savedTab);
         }
-        gateway.adoptStored(values[GATEWAY_URL_KEY]);
+        gateway.adoptStored(
+          values[SERVERS_KEY],
+          values[ACTIVE_SERVER_KEY],
+          values[GATEWAY_URL_KEY],
+        );
       })
       .catch(() => {})
       .finally(() => {
@@ -1237,8 +1244,8 @@ function LoomApp() {
       <View style={styles.gatewayCard}>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={gateway.expanded ? 'Collapse gateway settings' : 'Expand gateway settings'}
-          onPress={() => gateway.setExpanded((current) => !current)}
+          accessibilityLabel={`Switch server, currently ${serverLabel(gateway.activeServer)}`}
+          onPress={() => setServerPickerOpen(true)}
           style={styles.gatewaySummary}
         >
           <View style={styles.gatewaySummaryCopy}>
@@ -1249,39 +1256,21 @@ function LoomApp() {
                   gateway.error ? styles.gatewayDotError : styles.gatewayDotOnline,
                 ]}
               />
-              <Text style={styles.gatewayLabel}>
-                {gateway.error ? 'Gateway unavailable' : 'Gateway connected'}
+              <Text numberOfLines={1} style={styles.gatewayLabel}>
+                {serverLabel(gateway.activeServer)}
               </Text>
+              {gateway.servers.length > 1 ? (
+                <View style={styles.gatewayCountBadge}>
+                  <Text style={styles.gatewayCountText}>{gateway.servers.length}</Text>
+                </View>
+              ) : null}
             </View>
             <Text numberOfLines={1} style={styles.gatewayUrl}>
-              {gateway.baseUrl}
+              {gateway.error ? gateway.error : gateway.baseUrl}
             </Text>
           </View>
-          <Icon name={gateway.expanded ? 'chevron-down' : 'settings-outline'} size={17} />
+          <Icon name="swap-horizontal-outline" size={17} />
         </Pressable>
-        {gateway.expanded && (
-          <View style={styles.gatewayEditor}>
-            <TextInput
-              value={gateway.draft}
-              onChangeText={gateway.setDraft}
-              autoCapitalize="none"
-              autoCorrect={false}
-              keyboardType="url"
-              style={styles.gatewayInput}
-              placeholder="http://127.0.0.1:8787"
-              placeholderTextColor={colors.textDim}
-              onSubmitEditing={gateway.connect}
-            />
-            <View style={styles.gatewayActions}>
-              <Pressable onPress={gateway.reset} style={styles.gatewayReset}>
-                <Text style={styles.gatewayResetText}>Use default</Text>
-              </Pressable>
-              <Pressable onPress={gateway.connect} style={styles.gatewayConnect}>
-                <Text style={styles.gatewayConnectText}>Connect</Text>
-              </Pressable>
-            </View>
-          </View>
-        )}
       </View>
     </View>
   );
@@ -1448,7 +1437,7 @@ function LoomApp() {
             working={working}
             target={target}
             gatewayUrl={gateway.baseUrl}
-            gatewayAuthToken={DEFAULT_GATEWAY_AUTH_TOKEN}
+            gatewayAuthToken={gateway.authToken}
             fontSize={terminalFontSize}
             captureLines={terminal.captureLines}
             terminalKeyPending={terminal.keyPending}
@@ -1713,21 +1702,14 @@ function LoomApp() {
             <Icon name="alert-circle-outline" color={colors.red} />
             <Text style={styles.connectErrorText}>{gateway.error}</Text>
           </View>
-          <TextInput
-            value={gateway.draft}
-            onChangeText={gateway.setDraft}
-            autoCapitalize="none"
-            autoCorrect={false}
-            style={styles.connectInput}
-            placeholder="http://127.0.0.1:8787"
-            placeholderTextColor={colors.textDim}
-            onSubmitEditing={gateway.connect}
-          />
+          <Text numberOfLines={1} style={styles.connectCurrent}>
+            {serverLabel(gateway.activeServer)} · {gateway.baseUrl}
+          </Text>
           <ActionButton
-            label="Connect"
-            icon="arrow-forward"
+            label="Choose server"
+            icon="swap-horizontal-outline"
             tone="primary"
-            onPress={gateway.connect}
+            onPress={() => setServerPickerOpen(true)}
           />
           <Pressable onPress={gateway.reset} style={styles.connectReset}>
             <Icon name="refresh-outline" size={14} color={colors.primary} />
@@ -1737,6 +1719,16 @@ function LoomApp() {
             LOOM_WEB_AUTH_TOKEN=… pnpm gateway
           </Text>
         </View>
+        <ServerPickerModal
+          visible={serverPickerOpen}
+          servers={gateway.servers}
+          activeId={gateway.activeId}
+          onSelect={gateway.selectServer}
+          onSave={gateway.saveServer}
+          onRemove={gateway.removeServer}
+          onCreate={() => gateway.createServer()}
+          onClose={() => setServerPickerOpen(false)}
+        />
       </SafeAreaView>
     );
   }
@@ -1750,6 +1742,16 @@ function LoomApp() {
           {(!isCompact || selectedSlug) && taskPane}
         </View>
       </SafeAreaView>
+      <ServerPickerModal
+        visible={serverPickerOpen}
+        servers={gateway.servers}
+        activeId={gateway.activeId}
+        onSelect={gateway.selectServer}
+        onSave={gateway.saveServer}
+        onRemove={gateway.removeServer}
+        onCreate={() => gateway.createServer()}
+        onClose={() => setServerPickerOpen(false)}
+      />
       <ProjectPickerModal
         visible={projectPickerOpen}
         projects={projects}
